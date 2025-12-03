@@ -195,9 +195,70 @@ async function chargeGooglePayToken({
   return promisify(instance.createPayment.bind(instance), requestObj);
 }
 
+// Google Pay via Base64-encoded payment blob (paymentInformation.fluidData.value)
+// with paymentSolution "012" (Barclays decryption option).
+async function createGooglePayPaymentFromBlob({
+  googlePayBlob,
+  amount,
+  currency,
+  referenceCode,
+  billingInfo,
+}) {
+  if (!googlePayBlob) {
+    throw new Error('googlePayBlob is required');
+  }
+
+  const { configObject, apiClient } = createApiClients();
+
+  const requestObj = new cybersourceRestApi.CreatePaymentRequest();
+
+  const clientReferenceInformation =
+    new cybersourceRestApi.Ptsv2paymentsClientReferenceInformation();
+  clientReferenceInformation.code =
+    referenceCode || 'GPAY_BLOB_' + Date.now().toString();
+  requestObj.clientReferenceInformation = clientReferenceInformation;
+
+  const processingInformation =
+    new cybersourceRestApi.Ptsv2paymentsProcessingInformation();
+  processingInformation.capture = true;
+  // Payment solution 012 = Google Pay via Barclays decryption
+  processingInformation.paymentSolution = '012';
+  requestObj.paymentInformation = requestObj.paymentInformation || new cybersourceRestApi.Ptsv2paymentsPaymentInformation();
+  requestObj.processingInformation = processingInformation;
+
+  const orderInformation =
+    new cybersourceRestApi.Ptsv2paymentsOrderInformation();
+  const amountDetails =
+    new cybersourceRestApi.Ptsv2paymentsOrderInformationAmountDetails();
+  amountDetails.totalAmount = parseFloat(amount)
+    .toFixed(2)
+    .toString();
+  amountDetails.currency = currency;
+  orderInformation.amountDetails = amountDetails;
+
+  if (billingInfo && Object.keys(billingInfo).length > 0) {
+    const orderInformationBillTo =
+      new cybersourceRestApi.Ptsv2paymentsOrderInformationBillTo();
+    Object.assign(orderInformationBillTo, billingInfo);
+    orderInformation.billTo = orderInformationBillTo;
+  }
+
+  const paymentInformation =
+    new cybersourceRestApi.Ptsv2paymentsPaymentInformation();
+  const fluidData =
+    new cybersourceRestApi.Ptsv2paymentsPaymentInformationFluidData();
+  fluidData.value = googlePayBlob;
+  paymentInformation.fluidData = fluidData;
+  requestObj.paymentInformation = paymentInformation;
+
+  const instance = new cybersourceRestApi.PaymentsApi(configObject, apiClient);
+  return promisify(instance.createPayment.bind(instance), requestObj);
+}
+
 module.exports = {
   createCardPayment,
   generateCaptureContext,
   chargeGooglePayToken,
+  createGooglePayPaymentFromBlob,
 };
 

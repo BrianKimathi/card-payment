@@ -6,6 +6,7 @@ const {
   createCardPayment,
   generateCaptureContext,
   chargeGooglePayToken,
+  createGooglePayPaymentFromBlob,
 } = require("./src/cybersourceService");
 
 const app = express();
@@ -96,32 +97,58 @@ app.post("/api/googlepay/capture-context", async (req, res) => {
 
 app.post("/api/googlepay/charge", async (req, res) => {
   try {
-    const { transientToken, amount, currency, referenceCode, billingInfo } =
-      req.body || {};
+    const {
+      transientToken,
+      googlePayBlob,
+      amount,
+      currency,
+      referenceCode,
+      billingInfo,
+    } = req.body || {};
     logJson("GPAY_CHARGE_REQUEST", {
       transientToken,
+      googlePayBlobLen: googlePayBlob ? String(googlePayBlob).length : 0,
       amount,
       currency,
       referenceCode,
       billingInfo,
     });
-    if (!transientToken || !amount || !currency) {
+    if (!amount || !currency || (!transientToken && !googlePayBlob)) {
       logJson("GPAY_CHARGE_ERROR", {
         status: 400,
-        error: "Missing required google pay charge fields",
+        error:
+          "Missing required google pay charge fields (googlePayBlob or transientToken)",
       });
-      return res
-        .status(400)
-        .json({ error: "transientToken, amount, and currency are required" });
+      return res.status(400).json({
+        error:
+          "googlePayBlob or transientToken, plus amount and currency, are required",
+      });
     }
 
-    const result = await chargeGooglePayToken({
-      transientToken,
-      amount,
-      currency,
-      referenceCode,
-      billingInfo,
-    });
+    let result;
+    if (googlePayBlob) {
+      logJson("GPAY_CHARGE_MODE", {
+        mode: "blob",
+        googlePayBlobLen: String(googlePayBlob).length,
+      });
+      result = await createGooglePayPaymentFromBlob({
+        googlePayBlob,
+        amount,
+        currency,
+        referenceCode,
+        billingInfo,
+      });
+    } else {
+      logJson("GPAY_CHARGE_MODE", { mode: "transientToken" });
+      result = await chargeGooglePayToken({
+        transientToken,
+        amount,
+        currency,
+        referenceCode,
+        billingInfo,
+      });
+    }
+
     logJson("GPAY_CHARGE_RESPONSE", result?.data || {});
     res.status(result.response?.status || 200).json(result.data);
   } catch (err) {
