@@ -5,6 +5,7 @@
   "scripts": {
     "test": "node test-card-payment.js",
     "test:payment": "node test-card-payment.js",
+    "test:payer-auth": "node test-payer-auth.js",
     "gpay:capture": "node googlepay-capture-context.js",
     "gpay:charge": "node googlepay-charge-transient.js",
     "start": "node server.js",
@@ -17,6 +18,7 @@
   "dependencies": {
     "cors": "^2.8.5",
     "cybersource-rest-client": "^0.0.73",
+    "dotenv": "^16.4.5",
     "express": "^5.1.0",
     "morgan": "^1.10.0",
     "nodemon": "^3.1.11"
