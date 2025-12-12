@@ -42,8 +42,17 @@ function logJson(label, payload) {
 }
 
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, service: "CyberSource Helper" });
+  res.json({ ok: true, service: "KileKitabu Backend (Node.js)" });
 });
+
+// Import routes
+const mpesaRoutes = require("./routes/mpesa");
+const subscriptionRoutes = require("./routes/subscription");
+const notificationRoutes = require("./routes/notifications");
+
+app.use("/api/mpesa", mpesaRoutes);
+app.use("/api", subscriptionRoutes);
+app.use("/api/notifications", notificationRoutes);
 
 app.post("/api/cards/pay", async (req, res) => {
   const startTime = Date.now();
@@ -560,5 +569,6 @@ app.use((err, _req, res, _next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`CyberSource helper server running on http://localhost:${PORT}`);
+  console.log(`KileKitabu Backend (Node.js) running on http://localhost:${PORT}`);
+  console.log(`Environment: ${process.env.NODE_ENV || "development"}`);
 });

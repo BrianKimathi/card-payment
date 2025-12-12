@@ -9,6 +9,10 @@ node_modules/
 .env
 .env.local
 
+# Firebase credentials (use FIREBASE_CREDENTIALS_JSON env var instead)
+*-firebase-adminsdk-*.json
+firebase-admin*.json
+
 # IDE
 .vscode/
 .idea/
