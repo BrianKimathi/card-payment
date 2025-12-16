@@ -16,7 +16,12 @@ const fcmService = new FCMV1Service(config.FIREBASE_PROJECT_ID);
 router.post("/register-token", async (req, res) => {
   try {
     if (!db) {
-      return res.status(500).json({ error: "Firebase not available" });
+      console.error("[register_token] ❌ Firebase database not initialized");
+      console.error("[register_token] Check FIREBASE_CREDENTIALS_JSON environment variable");
+      return res.status(500).json({ 
+        error: "Firebase not available",
+        message: "Firebase database not initialized. Check server logs for details."
+      });
     }
 
     const { user_id, token } = req.body;

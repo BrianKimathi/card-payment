@@ -31,9 +31,23 @@ function initializeFirebase() {
     let credential;
     if (credentialsJson) {
       // Use JSON string from environment
-      const creds = JSON.parse(credentialsJson);
-      credential = admin.credential.cert(creds);
-      console.log("[Firebase] Initialized from FIREBASE_CREDENTIALS_JSON env var");
+      try {
+        // Try parsing as JSON string first
+        let creds;
+        if (typeof credentialsJson === 'string' && credentialsJson.trim().startsWith('{')) {
+          creds = JSON.parse(credentialsJson);
+        } else {
+          // Might be base64 encoded
+          const decoded = Buffer.from(credentialsJson, 'base64').toString('utf-8');
+          creds = JSON.parse(decoded);
+        }
+        credential = admin.credential.cert(creds);
+        console.log("[Firebase] ✅ Initialized from FIREBASE_CREDENTIALS_JSON env var");
+      } catch (parseError) {
+        console.error("[Firebase] ❌ Failed to parse FIREBASE_CREDENTIALS_JSON:", parseError.message);
+        console.error("[Firebase] First 100 chars:", credentialsJson.substring(0, 100));
+        return { db: null, auth: null };
+      }
     } else if (fs.existsSync(credentialsPath)) {
       // Use credentials file
       credential = admin.credential.cert(credentialsPath);

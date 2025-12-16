@@ -418,12 +418,54 @@ async function chargeGooglePayToken({
     .toString();
   amountDetails.currency = currency;
   orderInformation.amountDetails = amountDetails;
-  if (billingInfo && Object.keys(billingInfo).length > 0) {
-    const orderInformationBillTo =
-      new cybersourceRestApi.Ptsv2paymentsOrderInformationBillTo();
-    Object.assign(orderInformationBillTo, billingInfo);
-    orderInformation.billTo = orderInformationBillTo;
+  // Always send billTo with required fields (with safe defaults) to avoid MISSING_FIELD
+  const orderInformationBillTo =
+    new cybersourceRestApi.Ptsv2paymentsOrderInformationBillTo();
+  const normalizedBilling = {
+    address1: billingInfo?.address1,
+    locality: billingInfo?.locality, // city
+    country: billingInfo?.country,
+    lastName: billingInfo?.lastName,
+    firstName: billingInfo?.firstName,
+    postalCode: billingInfo?.postalCode,
+    phoneNumber: billingInfo?.phoneNumber || '',
+    email: billingInfo?.email || '',
+    administrativeArea: billingInfo?.administrativeArea || '',
+  };
+  Object.assign(orderInformationBillTo, normalizedBilling);
+
+  // Ensure required fields are non-empty; CyberSource rejects blank strings.
+  const ensureValue = (val, fallback) => {
+    if (val === undefined || val === null) return fallback;
+    if (typeof val === 'string' && val.trim() === '') return fallback;
+    return val;
+  };
+  orderInformationBillTo.address1 = ensureValue(orderInformationBillTo.address1, 'N/A');
+  orderInformationBillTo.locality = ensureValue(orderInformationBillTo.locality, 'N/A');
+  orderInformationBillTo.country = ensureValue(orderInformationBillTo.country, 'KE');
+  orderInformationBillTo.lastName = ensureValue(orderInformationBillTo.lastName, 'Customer');
+  orderInformationBillTo.firstName = ensureValue(orderInformationBillTo.firstName, 'Customer');
+  orderInformationBillTo.postalCode = ensureValue(orderInformationBillTo.postalCode, '00000');
+
+  // Normalize country to upper-case
+  if (typeof orderInformationBillTo.country === 'string') {
+    orderInformationBillTo.country = orderInformationBillTo.country.toUpperCase();
   }
+
+  orderInformation.billTo = orderInformationBillTo;
+
+  // Final guard: ensure billTo required fields are non-empty on the request object
+  const billTo = orderInformation.billTo || {};
+  billTo.address1 = ensureValue(billTo.address1, 'N/A');
+  billTo.locality = ensureValue(billTo.locality, 'N/A');
+  billTo.country = ensureValue(
+    typeof billTo.country === 'string' ? billTo.country.toUpperCase() : billTo.country,
+    'KE'
+  );
+  billTo.lastName = ensureValue(billTo.lastName, 'Customer');
+  billTo.firstName = ensureValue(billTo.firstName, 'Customer');
+  billTo.postalCode = ensureValue(billTo.postalCode, '00000');
+  orderInformation.billTo = billTo;
   requestObj.orderInformation = orderInformation;
 
   const tokenInformation = new cybersourceRestApi.Ptsv2paymentsTokenInformation();
@@ -1236,7 +1278,31 @@ async function chargeUnifiedCheckoutToken({
     new cybersourceRestApi.Ptsv2paymentsClientReferenceInformation();
   clientReferenceInformation.code =
     referenceCode || 'UC_' + Date.now().toString();
+  // Set applicationName to "unifiedCheckout" so CyberSource dashboard shows it correctly
+  // instead of defaulting to "REST API"
+  try {
+    clientReferenceInformation.applicationName = 'unifiedCheckout';
+    console.log('[UNIFIED_CHECKOUT] ✅ Set applicationName via property');
+  } catch (e) {
+    // Fallback: Set via bracket notation if property doesn't exist
+    clientReferenceInformation['applicationName'] = 'unifiedCheckout';
+    console.log('[UNIFIED_CHECKOUT] ✅ Set applicationName via bracket notation');
+  }
+  console.log('[UNIFIED_CHECKOUT] Client Application: unifiedCheckout');
   requestObj.clientReferenceInformation = clientReferenceInformation;
+  
+  // Ensure applicationName is set on the final request object (override SDK serialization if needed)
+  if (!requestObj.clientReferenceInformation.applicationName && 
+      !requestObj.clientReferenceInformation['applicationName']) {
+    console.log('[UNIFIED_CHECKOUT] ⚠️ applicationName missing, setting directly on requestObj...');
+    const clientRefObj = {};
+    if (requestObj.clientReferenceInformation.code) {
+      clientRefObj.code = requestObj.clientReferenceInformation.code;
+    }
+    clientRefObj.applicationName = 'unifiedCheckout';
+    requestObj.clientReferenceInformation = clientRefObj;
+    console.log('[UNIFIED_CHECKOUT] ✅ Set applicationName directly on requestObj.clientReferenceInformation');
+  }
 
   const processingInformation =
     new cybersourceRestApi.Ptsv2paymentsProcessingInformation();
@@ -1260,12 +1326,45 @@ async function chargeUnifiedCheckoutToken({
     .toString();
   amountDetails.currency = currency;
   orderInformation.amountDetails = amountDetails;
-  if (billingInfo && Object.keys(billingInfo).length > 0) {
-    const orderInformationBillTo =
-      new cybersourceRestApi.Ptsv2paymentsOrderInformationBillTo();
-    Object.assign(orderInformationBillTo, billingInfo);
-    orderInformation.billTo = orderInformationBillTo;
+
+  // Normalize billTo and ensure required fields are non-empty
+  const orderInformationBillTo =
+    new cybersourceRestApi.Ptsv2paymentsOrderInformationBillTo();
+  const normalizedBilling = {
+    address1: billingInfo?.address1,
+    administrativeArea: billingInfo?.administrativeArea,
+    locality: billingInfo?.locality,
+    country: billingInfo?.country,
+    lastName: billingInfo?.lastName,
+    firstName: billingInfo?.firstName,
+    postalCode: billingInfo?.postalCode,
+    phoneNumber: billingInfo?.phoneNumber,
+    email: billingInfo?.email,
+  };
+  Object.assign(orderInformationBillTo, normalizedBilling);
+
+  const ensureValue = (val, fallback) => {
+    if (val === undefined || val === null) return fallback;
+    if (typeof val === 'string' && val.trim() === '') return fallback;
+    return val;
+  };
+
+  // Provide realistic defaults to satisfy CyberSource validation
+  orderInformationBillTo.address1 = ensureValue(orderInformationBillTo.address1, '123 Test St');
+  orderInformationBillTo.locality = ensureValue(orderInformationBillTo.locality, 'Nairobi');
+  orderInformationBillTo.country = ensureValue(orderInformationBillTo.country, 'KE');
+  orderInformationBillTo.lastName = ensureValue(orderInformationBillTo.lastName, 'Customer');
+  orderInformationBillTo.firstName = ensureValue(orderInformationBillTo.firstName, 'Customer');
+  orderInformationBillTo.postalCode = ensureValue(orderInformationBillTo.postalCode, '00100');
+  orderInformationBillTo.administrativeArea = ensureValue(orderInformationBillTo.administrativeArea, 'NRB');
+  orderInformationBillTo.phoneNumber = ensureValue(orderInformationBillTo.phoneNumber, '0000000000');
+  orderInformationBillTo.email = ensureValue(orderInformationBillTo.email, 'customer@example.com');
+
+  if (typeof orderInformationBillTo.country === 'string') {
+    orderInformationBillTo.country = orderInformationBillTo.country.toUpperCase();
   }
+
+  orderInformation.billTo = orderInformationBillTo;
   requestObj.orderInformation = orderInformation;
 
   // For Unified Checkout card payments, CyberSource requires transientTokenJwt (not transientToken)

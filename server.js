@@ -18,6 +18,10 @@ const {
 const app = express();
 const PORT = process.env.PORT || 4000;
 
+// Run startup checks
+const { checkEnvironment } = require("./src/startupCheck");
+checkEnvironment();
+
 app.use(express.json({ limit: "1mb" }));
 app.use(morgan("dev"));
 
