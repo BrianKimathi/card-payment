@@ -2,6 +2,7 @@
 
 const express = require("express");
 const morgan = require("morgan");
+const cors = require("cors");
 const {
   createCardPayment,
   createCardPaymentWithAuth,
@@ -13,15 +14,59 @@ const {
   validateAuthenticationResults,
   searchTransactionsByReference,
   chargeUnifiedCheckoutToken,
+  checkPayerAuthEnrollmentWithToken,
+  validateAuthenticationResultsWithToken,
 } = require("./src/cybersourceService");
 
 const app = express();
-const PORT = process.env.PORT || 4000;
+const PORT = process.env.PORT || 5000;
 
 // Run startup checks
 const { checkEnvironment } = require("./src/startupCheck");
 checkEnvironment();
 
+// CORS configuration - Allow requests from Render.com and other origins
+const corsOptions = {
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps, Postman, etc.)
+    if (!origin) return callback(null, true);
+
+    // List of allowed origins
+    const allowedOrigins = [
+      "https://cybersource.onrender.com",
+      "https://unified-checkout-test.onrender.com",
+      /^https:\/\/.*\.onrender\.com$/, // Allow all Render.com subdomains
+      /^https:\/\/.*\.ngrok-free\.app$/, // Allow ngrok URLs for testing
+      /^https:\/\/.*\.ngrok\.io$/, // Allow ngrok.io URLs
+      "http://localhost:3000",
+      "http://localhost:8000",
+      "http://localhost:4000",
+    ];
+
+    // Check if origin matches any allowed pattern
+    const isAllowed = allowedOrigins.some((allowed) => {
+      if (typeof allowed === "string") {
+        return origin === allowed;
+      } else if (allowed instanceof RegExp) {
+        return allowed.test(origin);
+      }
+      return false;
+    });
+
+    if (isAllowed) {
+      callback(null, true);
+    } else {
+      console.warn(`[CORS] Blocked origin: ${origin}`);
+      callback(null, true); // Allow all for now, but log blocked origins
+    }
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
+  exposedHeaders: ["Content-Type", "Authorization"],
+};
+
+app.use(cors(corsOptions));
 app.use(express.json({ limit: "1mb" }));
 app.use(morgan("dev"));
 
@@ -60,8 +105,8 @@ app.use("/api/notifications", notificationRoutes);
 
 app.post("/api/cards/pay", async (req, res) => {
   const startTime = Date.now();
-  console.log('[API] POST /api/cards/pay - Card payment request received');
-  
+  console.log("[API] POST /api/cards/pay - Card payment request received");
+
   try {
     const {
       amount,
@@ -74,7 +119,7 @@ app.post("/api/cards/pay", async (req, res) => {
       authenticationResult,
     } = req.body || {};
 
-    console.log('[API] Request validation...');
+    console.log("[API] Request validation...");
     if (
       !amount ||
       !currency ||
@@ -82,20 +127,32 @@ app.post("/api/cards/pay", async (req, res) => {
       !card?.expirationMonth ||
       !card?.expirationYear
     ) {
-      console.log('[API] ❌ Validation failed: Missing required card payment fields');
+      console.log(
+        "[API] ❌ Validation failed: Missing required card payment fields"
+      );
       return res
         .status(400)
         .json({ error: "Missing required card payment fields" });
     }
-    console.log('[API] ✅ Request validated');
+    console.log("[API] ✅ Request validated");
     console.log(`[API] Amount: ${amount} ${currency}`);
-    console.log(`[API] Capture: ${capture !== false ? 'YES (authorize+capture)' : 'NO (authorize only)'}`);
-    console.log(`[API] 3D Secure Auth Transaction ID: ${authenticationTransactionId || 'Not provided'}`);
-    console.log(`[API] 3D Secure Auth Result: ${authenticationResult || 'Not provided'}`);
+    console.log(
+      `[API] Capture: ${
+        capture !== false ? "YES (authorize+capture)" : "NO (authorize only)"
+      }`
+    );
+    console.log(
+      `[API] 3D Secure Auth Transaction ID: ${
+        authenticationTransactionId || "Not provided"
+      }`
+    );
+    console.log(
+      `[API] 3D Secure Auth Result: ${authenticationResult || "Not provided"}`
+    );
 
     // Use authenticated payment flow if authentication data is provided
     if (authenticationTransactionId || authenticationResult) {
-      console.log('[API] 🔐 Using 3D Secure authenticated payment flow');
+      console.log("[API] 🔐 Using 3D Secure authenticated payment flow");
       const result = await createCardPaymentWithAuth({
         amount,
         currency,
@@ -106,14 +163,14 @@ app.post("/api/cards/pay", async (req, res) => {
         authenticationTransactionId,
         authenticationResult,
       });
-      
+
       const duration = Date.now() - startTime;
       console.log(`[API] ✅ Payment completed in ${duration}ms`);
       console.log(`[API] Response Status: ${result.response?.status || 200}`);
-      
+
       res.status(result.response?.status || 200).json(result.data);
     } else {
-      console.log('[API] 💳 Using standard payment flow (no 3D Secure)');
+      console.log("[API] 💳 Using standard payment flow (no 3D Secure)");
       const result = await createCardPayment({
         amount,
         currency,
@@ -122,11 +179,11 @@ app.post("/api/cards/pay", async (req, res) => {
         referenceCode,
         capture,
       });
-      
+
       const duration = Date.now() - startTime;
       console.log(`[API] ✅ Payment completed in ${duration}ms`);
       console.log(`[API] Response Status: ${result.response?.status || 200}`);
-      
+
       res.status(result.response?.status || 200).json(result.data);
     }
   } catch (err) {
@@ -134,11 +191,15 @@ app.post("/api/cards/pay", async (req, res) => {
     const status = err.response?.status || 500;
     console.log(`[API] ❌ Payment failed after ${duration}ms`);
     console.log(`[API] Error Status: ${status}`);
-    console.log(`[API] Error Message: ${err.error || err.message || 'Unknown error'}`);
+    console.log(
+      `[API] Error Message: ${err.error || err.message || "Unknown error"}`
+    );
     if (err.response?.text) {
-      console.log(`[API] Error Response Body: ${err.response.text.substring(0, 500)}`);
+      console.log(
+        `[API] Error Response Body: ${err.response.text.substring(0, 500)}`
+      );
     }
-    
+
     res.status(status).json({
       error: err.error || err.message || "Card payment failed",
       responseBody: err.response?.text,
@@ -153,9 +214,36 @@ app.post("/api/unified-checkout/capture-context", async (req, res) => {
     // Default to both PANENTRY (card) and GOOGLEPAY if not specified
     // Note: CyberSource Unified Checkout uses "PANENTRY" for card payments, not "CARD"
     const requestBody = req.body || {};
-    if (!requestBody.allowedPaymentTypes) {
-      requestBody.allowedPaymentTypes = ['PANENTRY', 'GOOGLEPAY'];
+
+    // Normalize targetOrigins - trim whitespace from each URL
+    if (requestBody.targetOrigins && Array.isArray(requestBody.targetOrigins)) {
+      requestBody.targetOrigins = requestBody.targetOrigins
+        .map((origin) => (typeof origin === "string" ? origin.trim() : origin))
+        .filter((origin) => origin && origin.length > 0); // Remove empty strings
     }
+
+    if (!requestBody.allowedPaymentTypes) {
+      requestBody.allowedPaymentTypes = ["PANENTRY", "GOOGLEPAY"];
+    }
+    // Default completeMandate to OFF. In our environment it has been producing $0.00 auth/settlement
+    // and duplicate records (payer-auth validation + UC_* payment).
+    // You can explicitly enable it by passing useCompleteMandate=true from the client, or via env.
+    if (typeof requestBody.useCompleteMandate === "undefined") {
+      requestBody.useCompleteMandate =
+        String(process.env.UC_USE_COMPLETE_MANDATE || "").toLowerCase() ===
+        "true";
+    }
+    if (typeof requestBody.completeMandateType === "undefined") {
+      // CAPTURE: authorize+capture in one step (matches our processingInformation.capture=true)
+      requestBody.completeMandateType = "CAPTURE";
+    }
+    if (typeof requestBody.enableConsumerAuthentication === "undefined") {
+      requestBody.enableConsumerAuthentication = true;
+    }
+    if (typeof requestBody.enableDecisionManager === "undefined") {
+      requestBody.enableDecisionManager = true;
+    }
+
     const captureContext = await generateCaptureContext(requestBody);
     logJson("UNIFIED_CHECKOUT_CAPTURE_CONTEXT_RESPONSE", captureContext);
     res.json(captureContext);
@@ -180,9 +268,9 @@ app.post("/api/googlepay/capture-context", async (req, res) => {
     // Ensure GOOGLEPAY is included
     const requestBody = req.body || {};
     if (!requestBody.allowedPaymentTypes) {
-      requestBody.allowedPaymentTypes = ['GOOGLEPAY'];
-    } else if (!requestBody.allowedPaymentTypes.includes('GOOGLEPAY')) {
-      requestBody.allowedPaymentTypes.push('GOOGLEPAY');
+      requestBody.allowedPaymentTypes = ["GOOGLEPAY"];
+    } else if (!requestBody.allowedPaymentTypes.includes("GOOGLEPAY")) {
+      requestBody.allowedPaymentTypes.push("GOOGLEPAY");
     }
     const captureContext = await generateCaptureContext(requestBody);
     logJson("GPAY_CAPTURE_CONTEXT_RESPONSE", captureContext);
@@ -209,13 +297,15 @@ app.post("/api/googlepay/capture-context", async (req, res) => {
  */
 app.post("/api/payer-auth/enroll", async (req, res) => {
   const startTime = Date.now();
-  console.log('[API] POST /api/payer-auth/enroll - Enrollment check request received');
-  
+  console.log(
+    "[API] POST /api/payer-auth/enroll - Enrollment check request received"
+  );
+
   try {
     const { amount, currency, card, billingInfo, referenceCode } =
       req.body || {};
 
-    console.log('[API] Request validation...');
+    console.log("[API] Request validation...");
     if (
       !amount ||
       !currency ||
@@ -223,12 +313,12 @@ app.post("/api/payer-auth/enroll", async (req, res) => {
       !card?.expirationMonth ||
       !card?.expirationYear
     ) {
-      console.log('[API] ❌ Validation failed: Missing required fields');
+      console.log("[API] ❌ Validation failed: Missing required fields");
       return res.status(400).json({
         error: "Missing required fields: amount, currency, card details",
       });
     }
-    console.log('[API] ✅ Request validated');
+    console.log("[API] ✅ Request validated");
 
     logJson("PA_ENROLL_REQUEST", {
       amount,
@@ -237,7 +327,7 @@ app.post("/api/payer-auth/enroll", async (req, res) => {
       referenceCode,
     });
 
-    console.log('[API] Calling checkPayerAuthEnrollment...');
+    console.log("[API] Calling checkPayerAuthEnrollment...");
     const result = await checkPayerAuthEnrollment({
       amount,
       currency,
@@ -249,7 +339,7 @@ app.post("/api/payer-auth/enroll", async (req, res) => {
     const duration = Date.now() - startTime;
     console.log(`[API] ✅ Enrollment check completed in ${duration}ms`);
     console.log(`[API] Response Status: ${result.response?.status || 200}`);
-    
+
     logJson("PA_ENROLL_RESPONSE", result?.data || {});
     res.status(result.response?.status || 200).json(result.data);
   } catch (err) {
@@ -257,8 +347,10 @@ app.post("/api/payer-auth/enroll", async (req, res) => {
     const status = err.response?.status || 500;
     console.log(`[API] ❌ Enrollment check failed after ${duration}ms`);
     console.log(`[API] Error Status: ${status}`);
-    console.log(`[API] Error Message: ${err.error || err.message || 'Unknown error'}`);
-    
+    console.log(
+      `[API] Error Message: ${err.error || err.message || "Unknown error"}`
+    );
+
     logJson("PA_ENROLL_ERROR", {
       status,
       message: err.error || err.message,
@@ -277,8 +369,7 @@ app.post("/api/payer-auth/enroll", async (req, res) => {
  */
 app.post("/api/payer-auth/setup", async (req, res) => {
   try {
-    const { card, transientToken, referenceCode, billingInfo } =
-      req.body || {};
+    const { card, transientToken, referenceCode, billingInfo } = req.body || {};
 
     if (!card && !transientToken) {
       return res.status(400).json({
@@ -375,8 +466,96 @@ app.post("/api/payer-auth/validate", async (req, res) => {
       responseBody: err.response?.text,
     });
     res.status(status).json({
+      error: err.error || err.message || "Authentication validation failed",
+      responseBody: err.response?.text,
+    });
+  }
+});
+
+/**
+ * Unified Checkout Payer Authentication (3DS) with transient token (JTI)
+ * This matches the Java sample Risk API 3DS flow but uses the UC token.
+ */
+app.post("/api/unified-checkout/payer-auth/enroll", async (req, res) => {
+  try {
+    const { transientToken, amount, currency, billingInfo, referenceCode } =
+      req.body || {};
+
+    if (!transientToken || !amount || !currency) {
+      return res.status(400).json({
+        error: "transientToken, amount, and currency are required",
+      });
+    }
+
+    logJson("UC_PA_ENROLL_REQUEST", {
+      amount,
+      currency,
+      referenceCode,
+      hasBillingInfo: !!billingInfo,
+      transientTokenLength: transientToken.length,
+    });
+
+    const result = await checkPayerAuthEnrollmentWithToken({
+      transientTokenJwt: transientToken,
+      amount,
+      currency,
+      billingInfo,
+      referenceCode,
+    });
+
+    logJson("UC_PA_ENROLL_RESPONSE", result?.data || {});
+    res.status(result.response?.status || 200).json(result.data);
+  } catch (err) {
+    const status = err.response?.status || 500;
+    logJson("UC_PA_ENROLL_ERROR", {
+      status,
+      message: err.error || err.message,
+      responseBody: err.response?.text,
+    });
+    res.status(status).json({
       error:
-        err.error || err.message || "Authentication validation failed",
+        err.error ||
+        err.message ||
+        "Unified Checkout payer-auth enrollment check failed",
+      responseBody: err.response?.text,
+    });
+  }
+});
+
+app.post("/api/unified-checkout/payer-auth/validate", async (req, res) => {
+  try {
+    const { transientToken, authenticationTransactionId } = req.body || {};
+
+    if (!transientToken || !authenticationTransactionId) {
+      return res.status(400).json({
+        error: "transientToken and authenticationTransactionId are required",
+      });
+    }
+
+    logJson("UC_PA_VALIDATE_REQUEST", {
+      authenticationTransactionId,
+      transientTokenLength: transientToken.length,
+    });
+
+    const result = await validateAuthenticationResultsWithToken({
+      transientTokenJwt: transientToken,
+      authenticationTransactionId,
+    });
+
+    logJson("UC_PA_VALIDATE_RESPONSE", result?.data || {});
+    res.status(result.response?.status || 200).json(result.data);
+  } catch (err) {
+    const status = err.response?.status || 500;
+    logJson("UC_PA_VALIDATE_ERROR", {
+      status,
+      message: err.error || err.message,
+      responseBody: err.response?.text,
+    });
+    res.status(status).json({
+      error:
+        err.error ||
+        err.message ||
+        "Unified Checkout authentication validation failed",
       responseBody: err.response?.text,
     });
   }
@@ -391,7 +570,10 @@ app.post("/api/unified-checkout/charge", async (req, res) => {
       currency,
       referenceCode,
       billingInfo,
-      paymentType = 'CARD', // 'CARD' or 'GOOGLEPAY'
+      paymentType = "CARD", // 'CARD' or 'GOOGLEPAY'
+      authenticationTransactionId, // Optional: 3DS authentication transaction ID
+      authenticationResult, // Optional: 3DS authentication result ('Y', 'N', 'U')
+      completeResponse, // Optional: complete() response to check if payment was already processed
     } = req.body || {};
     logJson("UNIFIED_CHECKOUT_CHARGE_REQUEST", {
       transientToken,
@@ -400,6 +582,10 @@ app.post("/api/unified-checkout/charge", async (req, res) => {
       referenceCode,
       paymentType,
       billingInfo,
+      authenticationTransactionId:
+        authenticationTransactionId || "Not provided",
+      authenticationResult: authenticationResult || "Not provided",
+      hasCompleteResponse: !!completeResponse,
     });
     if (!amount || !currency || !transientToken) {
       logJson("UNIFIED_CHECKOUT_CHARGE_ERROR", {
@@ -418,6 +604,9 @@ app.post("/api/unified-checkout/charge", async (req, res) => {
       referenceCode,
       billingInfo,
       paymentType,
+      authenticationTransactionId,
+      authenticationResult,
+      completeResponse,
     });
 
     logJson("UNIFIED_CHECKOUT_CHARGE_RESPONSE", result?.data || {});
@@ -512,54 +701,58 @@ app.post("/api/googlepay/charge", async (req, res) => {
  */
 app.post("/api/transactions/search", async (req, res) => {
   const startTime = Date.now();
-  console.log('[API] POST /api/transactions/search - Transaction search request received');
-  
+  console.log(
+    "[API] POST /api/transactions/search - Transaction search request received"
+  );
+
   try {
     const { referenceCode, limit } = req.body || {};
-    
-    console.log('[API] Request validation...');
+
+    console.log("[API] Request validation...");
     if (!referenceCode) {
-      console.log('[API] ❌ Request validation failed: Missing referenceCode');
+      console.log("[API] ❌ Request validation failed: Missing referenceCode");
       return res.status(400).json({
         error: "referenceCode is required",
       });
     }
-    console.log('[API] ✅ Request validated');
-    
+    console.log("[API] ✅ Request validated");
+
     logJson("TX_SEARCH_REQUEST", {
       referenceCode,
       limit: limit || 10,
     });
-    
-    console.log('[API] Calling searchTransactionsByReference...');
+
+    console.log("[API] Calling searchTransactionsByReference...");
     const result = await searchTransactionsByReference({
       referenceCode,
       limit: limit || 10,
     });
-    
+
     const duration = Date.now() - startTime;
     console.log(`[API] ✅ Search completed in ${duration}ms`);
     console.log(`[API] Found ${result.count || 0} transaction(s)`);
-    
+
     logJson("TX_SEARCH_RESPONSE", {
       count: result.count || 0,
       transactions: result.transactions || [],
     });
-    
+
     res.status(200).json(result);
   } catch (err) {
     const duration = Date.now() - startTime;
     const status = err.response?.status || 500;
     console.log(`[API] ❌ Search failed after ${duration}ms`);
     console.log(`[API] Error Status: ${status}`);
-    console.log(`[API] Error Message: ${err.error || err.message || 'Unknown error'}`);
-    
+    console.log(
+      `[API] Error Message: ${err.error || err.message || "Unknown error"}`
+    );
+
     logJson("TX_SEARCH_ERROR", {
       status,
       message: err.error || err.message,
       responseBody: err.response?.text,
     });
-    
+
     res.status(status).json({
       error: err.error || err.message || "Transaction search failed",
       responseBody: err.response?.text,
@@ -573,6 +766,8 @@ app.use((err, _req, res, _next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`KileKitabu Backend (Node.js) running on http://localhost:${PORT}`);
+  console.log(
+    `KileKitabu Backend (Node.js) running on http://localhost:${PORT}`
+  );
   console.log(`Environment: ${process.env.NODE_ENV || "development"}`);
 });
