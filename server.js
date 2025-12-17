@@ -638,9 +638,10 @@ app.post("/api/unified-checkout/charge", requireAuth, async (req, res) => {
         const dailyRate = config.DAILY_RATE || 5; // Default to 5 KES/day if not configured
         const amountNum = parseFloat(amount) || 0;
 
-        // Convert USD to KES if needed (assuming 1 USD = 150 KES for now)
-        // TODO: Use actual exchange rate API
-        const amountInKes = currency === "USD" ? amountNum * 150 : amountNum;
+        // Convert USD to KES if needed
+        const usdToKesRate = config.USD_TO_KES_RATE || 130.0;
+        const amountInKes =
+          currency === "USD" ? amountNum * usdToKesRate : amountNum;
         const creditDays = Math.floor(amountInKes / dailyRate) || 1; // At least 1 day
 
         const currentCredit = parseInt(userData.credit_balance || 0);
@@ -780,7 +781,9 @@ app.post("/api/googlepay/charge", requireAuth, async (req, res) => {
         // Calculate credit days
         const dailyRate = config.DAILY_RATE || 5;
         const amountNum = parseFloat(amount) || 0;
-        const amountInKes = currency === "USD" ? amountNum * 150 : amountNum;
+        const usdToKesRate = config.USD_TO_KES_RATE || 130.0;
+        const amountInKes =
+          currency === "USD" ? amountNum * usdToKesRate : amountNum;
         const creditDays = Math.floor(amountInKes / dailyRate) || 1;
 
         const currentCredit = parseInt(userData.credit_balance || 0);
