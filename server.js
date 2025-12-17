@@ -101,10 +101,12 @@ app.get("/health", (_req, res) => {
 const mpesaRoutes = require("./routes/mpesa");
 const subscriptionRoutes = require("./routes/subscription");
 const notificationRoutes = require("./routes/notifications");
+const cronRoutes = require("./routes/cron");
 
 app.use("/api/mpesa", mpesaRoutes);
 app.use("/api", subscriptionRoutes);
 app.use("/api/notifications", notificationRoutes);
+app.use("/api/cron", cronRoutes);
 
 app.post("/api/cards/pay", async (req, res) => {
   const startTime = Date.now();
@@ -699,6 +701,109 @@ app.post("/api/unified-checkout/charge", requireAuth, async (req, res) => {
     res.status(status).json({
       error: err.error || err.message || "Unified Checkout charge failed",
       responseBody: err.response?.text,
+    });
+  }
+});
+
+// Add credits endpoint for payments already processed by complete()
+app.post("/api/unified-checkout/add-credits", requireAuth, async (req, res) => {
+  try {
+    const {
+      amount,
+      currency,
+      transactionId,
+      referenceCode,
+      completeResponse, // The complete() response JWT
+    } = req.body || {};
+
+    logJson("UNIFIED_CHECKOUT_ADD_CREDITS_REQUEST", {
+      amount,
+      currency,
+      transactionId,
+      referenceCode,
+      hasCompleteResponse: !!completeResponse,
+    });
+
+    if (!amount || !currency || !transactionId) {
+      return res.status(400).json({
+        error: "amount, currency, and transactionId are required",
+      });
+    }
+
+    const userId = req.userId; // Set by requireAuth middleware
+
+    try {
+      console.log(
+        `[UNIFIED_CHECKOUT_ADD_CREDITS] ✅ Adding credits for payment already processed by complete() - user: ${userId}, transactionId: ${transactionId}`
+      );
+
+      const userRef = db.ref(`registeredUser/${userId}`);
+      const userSnapshot = await userRef.once("value");
+      const userData = userSnapshot.val() || {};
+
+      // Calculate credit days
+      const dailyRate = config.DAILY_RATE || 5;
+      const amountNum = parseFloat(amount) || 0;
+      const usdToKesRate = config.USD_TO_KES_RATE || 130.0;
+      const amountInKes =
+        currency === "USD" ? amountNum * usdToKesRate : amountNum;
+      const creditDays = Math.floor(amountInKes / dailyRate) || 1;
+
+      const currentCredit = parseInt(userData.credit_balance || 0);
+      const newCredit = currentCredit + creditDays;
+
+      const now = new Date().toISOString();
+      const monthKey = now.substring(0, 7);
+      const monthly = userData.monthly_paid || {};
+      const monthSpend = parseFloat(monthly[monthKey] || 0) + amountInKes;
+      monthly[monthKey] = monthSpend;
+
+      await userRef.update({
+        credit_balance: newCredit,
+        total_payments: parseFloat(userData.total_payments || 0) + amountInKes,
+        monthly_paid: monthly,
+        last_payment_date: now,
+        updated_at: now,
+      });
+
+      // Update payment record
+      const paymentId = referenceCode || `UC_${Date.now()}`;
+      await db.ref(`payments/${userId}/${paymentId}`).update({
+        status: "completed",
+        transaction_id: transactionId,
+        credit_days_added: creditDays,
+        completed_at: now,
+        updated_at: now,
+        payment_method: "unified_checkout_complete",
+      });
+
+      console.log(
+        `[UNIFIED_CHECKOUT_ADD_CREDITS] ✅ Credits added: user_id=${userId}, amount=${amountInKes} KES, credit_days=${creditDays}, new_credit=${newCredit}`
+      );
+
+      res.status(200).json({
+        success: true,
+        credit_days: creditDays,
+        new_credit_balance: newCredit,
+        transaction_id: transactionId,
+      });
+    } catch (creditError) {
+      console.error(
+        `[UNIFIED_CHECKOUT_ADD_CREDITS] ⚠️ Failed to add credits: ${creditError.message}`
+      );
+      res.status(500).json({
+        error: "Failed to add credits",
+        message: creditError.message,
+      });
+    }
+  } catch (err) {
+    const status = err.response?.status || 500;
+    logJson("UNIFIED_CHECKOUT_ADD_CREDITS_ERROR", {
+      status,
+      message: err.error || err.message,
+    });
+    res.status(status).json({
+      error: err.error || err.message || "Failed to add credits",
     });
   }
 });
