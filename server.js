@@ -17,6 +17,9 @@ const {
   checkPayerAuthEnrollmentWithToken,
   validateAuthenticationResultsWithToken,
 } = require("./src/cybersourceService");
+const { db } = require("./src/firebaseService");
+const config = require("./src/config");
+const { requireAuth } = require("./src/authMiddleware");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -562,7 +565,7 @@ app.post("/api/unified-checkout/payer-auth/validate", async (req, res) => {
 });
 
 // Unified Checkout Charge (supports both CARD and GOOGLEPAY from Unified Checkout)
-app.post("/api/unified-checkout/charge", async (req, res) => {
+app.post("/api/unified-checkout/charge", requireAuth, async (req, res) => {
   try {
     const {
       transientToken,
@@ -610,6 +613,80 @@ app.post("/api/unified-checkout/charge", async (req, res) => {
     });
 
     logJson("UNIFIED_CHECKOUT_CHARGE_RESPONSE", result?.data || {});
+
+    // Add credits to user account if payment was successful
+    const status = result?.data?.status;
+    const transactionId = result?.data?.id;
+    const userId = req.userId; // Set by requireAuth middleware
+
+    if (
+      (status === "AUTHORIZED" || status === "CAPTURED") &&
+      userId &&
+      transactionId
+    ) {
+      try {
+        console.log(
+          `[UNIFIED_CHECKOUT_CHARGE] ✅ Payment successful, adding credits for user: ${userId}`
+        );
+
+        // Get user ID from auth token
+        const userRef = db.ref(`registeredUser/${userId}`);
+        const userSnapshot = await userRef.once("value");
+        const userData = userSnapshot.val() || {};
+
+        // Calculate credit days
+        const dailyRate = config.DAILY_RATE || 5; // Default to 5 KES/day if not configured
+        const amountNum = parseFloat(amount) || 0;
+
+        // Convert USD to KES if needed (assuming 1 USD = 150 KES for now)
+        // TODO: Use actual exchange rate API
+        const amountInKes = currency === "USD" ? amountNum * 150 : amountNum;
+        const creditDays = Math.floor(amountInKes / dailyRate) || 1; // At least 1 day
+
+        const currentCredit = parseInt(userData.credit_balance || 0);
+        const newCredit = currentCredit + creditDays;
+
+        const now = new Date().toISOString();
+        const monthKey = now.substring(0, 7);
+        const monthly = userData.monthly_paid || {};
+        const monthSpend = parseFloat(monthly[monthKey] || 0) + amountInKes;
+        monthly[monthKey] = monthSpend;
+
+        await userRef.update({
+          credit_balance: newCredit,
+          total_payments:
+            parseFloat(userData.total_payments || 0) + amountInKes,
+          monthly_paid: monthly,
+          last_payment_date: now,
+          updated_at: now,
+        });
+
+        // Update payment record
+        const paymentId = referenceCode || `UC_${Date.now()}`;
+        await db.ref(`payments/${userId}/${paymentId}`).update({
+          status: "completed",
+          transaction_id: transactionId,
+          credit_days_added: creditDays,
+          completed_at: now,
+          updated_at: now,
+        });
+
+        console.log(
+          `[UNIFIED_CHECKOUT_CHARGE] ✅ Credits added: user_id=${userId}, amount=${amountInKes} KES, credit_days=${creditDays}, new_credit=${newCredit}`
+        );
+
+        // Add credit_days to response
+        if (result.data) {
+          result.data.credit_days = creditDays;
+        }
+      } catch (creditError) {
+        console.error(
+          `[UNIFIED_CHECKOUT_CHARGE] ⚠️ Failed to add credits: ${creditError.message}`
+        );
+        // Don't fail the request if credit addition fails - payment was successful
+      }
+    }
+
     res.status(result.response?.status || 200).json(result.data);
   } catch (err) {
     const status = err.response?.status || 500;
@@ -625,7 +702,7 @@ app.post("/api/unified-checkout/charge", async (req, res) => {
   }
 });
 
-app.post("/api/googlepay/charge", async (req, res) => {
+app.post("/api/googlepay/charge", requireAuth, async (req, res) => {
   try {
     const {
       transientToken,
@@ -680,6 +757,73 @@ app.post("/api/googlepay/charge", async (req, res) => {
     }
 
     logJson("GPAY_CHARGE_RESPONSE", result?.data || {});
+
+    // Add credits to user account if payment was successful
+    const status = result?.data?.status;
+    const transactionId = result?.data?.id;
+    const userId = req.userId; // Set by requireAuth middleware
+
+    if (
+      (status === "AUTHORIZED" || status === "CAPTURED") &&
+      userId &&
+      transactionId
+    ) {
+      try {
+        console.log(
+          `[GPAY_CHARGE] ✅ Payment successful, adding credits for user: ${userId}`
+        );
+
+        const userRef = db.ref(`registeredUser/${userId}`);
+        const userSnapshot = await userRef.once("value");
+        const userData = userSnapshot.val() || {};
+
+        // Calculate credit days
+        const dailyRate = config.DAILY_RATE || 5;
+        const amountNum = parseFloat(amount) || 0;
+        const amountInKes = currency === "USD" ? amountNum * 150 : amountNum;
+        const creditDays = Math.floor(amountInKes / dailyRate) || 1;
+
+        const currentCredit = parseInt(userData.credit_balance || 0);
+        const newCredit = currentCredit + creditDays;
+
+        const now = new Date().toISOString();
+        const monthKey = now.substring(0, 7);
+        const monthly = userData.monthly_paid || {};
+        const monthSpend = parseFloat(monthly[monthKey] || 0) + amountInKes;
+        monthly[monthKey] = monthSpend;
+
+        await userRef.update({
+          credit_balance: newCredit,
+          total_payments:
+            parseFloat(userData.total_payments || 0) + amountInKes,
+          monthly_paid: monthly,
+          last_payment_date: now,
+          updated_at: now,
+        });
+
+        const paymentId = referenceCode || `GPay_${Date.now()}`;
+        await db.ref(`payments/${userId}/${paymentId}`).update({
+          status: "completed",
+          transaction_id: transactionId,
+          credit_days_added: creditDays,
+          completed_at: now,
+          updated_at: now,
+        });
+
+        console.log(
+          `[GPAY_CHARGE] ✅ Credits added: user_id=${userId}, amount=${amountInKes} KES, credit_days=${creditDays}, new_credit=${newCredit}`
+        );
+
+        if (result.data) {
+          result.data.credit_days = creditDays;
+        }
+      } catch (creditError) {
+        console.error(
+          `[GPAY_CHARGE] ⚠️ Failed to add credits: ${creditError.message}`
+        );
+      }
+    }
+
     res.status(result.response?.status || 200).json(result.data);
   } catch (err) {
     const status = err.response?.status || 500;
@@ -688,8 +832,26 @@ app.post("/api/googlepay/charge", async (req, res) => {
       message: err.error || err.message,
       responseBody: err.response?.text,
     });
+
+    // Parse error message for better user feedback
+    let errorMessage = err.error || err.message || "Google Pay charge failed";
+    if (err.response?.text) {
+      try {
+        const errorJson = JSON.parse(err.response.text);
+        errorMessage = errorJson.error || errorJson.message || errorMessage;
+      } catch (e) {
+        // If parsing fails, try to extract error from text
+        const invalidAccountMatch =
+          err.response.text.match(/invalid.*account/i);
+        if (invalidAccountMatch) {
+          errorMessage =
+            "Invalid account number. Please check your payment method.";
+        }
+      }
+    }
+
     res.status(status).json({
-      error: err.error || err.message || "Google Pay charge failed",
+      error: errorMessage,
       responseBody: err.response?.text,
     });
   }
