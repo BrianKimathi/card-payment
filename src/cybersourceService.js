@@ -383,10 +383,34 @@ async function generateCaptureContext(options = {}) {
   }
 
   if (Object.keys(billTo).length > 0) {
-    orderInformation.billTo = billTo;
-    console.log(
-      "[CAPTURE_CONTEXT] ✅ Added orderInformation.billTo to capture context (prefill user data)"
+    // IMPORTANT: CyberSource validates required billTo fields if billTo is present.
+    // So we only include billTo when we have a complete set of required fields.
+    const requiredFields = [
+      "firstName",
+      "lastName",
+      "email",
+      "phoneNumber",
+      "address1",
+      "locality",
+      "postalCode",
+      "country",
+      "buildingNumber",
+    ];
+    const missingRequired = requiredFields.filter(
+      (k) => !billTo[k] || (typeof billTo[k] === "string" && billTo[k].trim() === "")
     );
+
+    if (missingRequired.length === 0) {
+      orderInformation.billTo = billTo;
+      console.log(
+        "[CAPTURE_CONTEXT] ✅ Added orderInformation.billTo to capture context (prefill user data)"
+      );
+    } else {
+      console.warn(
+        "[CAPTURE_CONTEXT] ⚠️ Partial billingInfo provided but required fields are missing; omitting billTo to avoid validation errors:",
+        missingRequired
+      );
+    }
   } else {
     console.log(
       "[CAPTURE_CONTEXT] ℹ️ No billingInfo provided (or empty) — not setting orderInformation.billTo (no prefill)"
