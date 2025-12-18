@@ -43,6 +43,30 @@ function checkEnvironment() {
     errors.push(`❌ Missing CyberSource variables: ${missingCyberSource.join(", ")}`);
   } else {
     console.log("✅ CyberSource configured");
+    // Print a safe fingerprint of the CyberSource config to debug 401s without leaking secrets
+    const runEnv = process.env.CYBERSOURCE_RUN_ENVIRONMENT || "apitest.cybersource.com";
+    const merchantId = process.env.CYBERSOURCE_MERCHANT_ID || "";
+    const keyId = process.env.CYBERSOURCE_MERCHANT_KEY_ID || "";
+    const secret = process.env.CYBERSOURCE_MERCHANT_SECRET_KEY || "";
+    const keyIdFp =
+      keyId && keyId.length >= 8 ? `${keyId.slice(0, 4)}…${keyId.slice(-4)}` : "(missing)";
+    const secretFp =
+      secret && secret.length >= 8 ? `${secret.slice(0, 3)}…${secret.slice(-3)}` : "(missing)";
+
+    console.log(`✅ CYBERSOURCE_RUN_ENVIRONMENT: ${runEnv}`);
+    console.log(`✅ CYBERSOURCE_MERCHANT_ID: ${merchantId}`);
+    console.log(`✅ CYBERSOURCE_MERCHANT_KEY_ID (fingerprint): ${keyIdFp}`);
+    console.log(`✅ CYBERSOURCE_MERCHANT_SECRET_KEY (fingerprint): ${secretFp}`);
+
+    // Common misconfig: production creds used against apitest (or vice versa)
+    if (
+      runEnv.includes("apitest") &&
+      (process.env.CYBERSOURCE_RUN_ENVIRONMENT || "").includes("api.cybersource.com")
+    ) {
+      warnings.push(
+        "⚠️  CYBERSOURCE_RUN_ENVIRONMENT looks inconsistent (apitest vs api.cybersource.com)"
+      );
+    }
   }
 
   // Check for wrong variable names
