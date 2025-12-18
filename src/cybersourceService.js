@@ -347,96 +347,51 @@ async function generateCaptureContext(options = {}) {
     new cybersourceRestApi.Upv1capturecontextsOrderInformation();
   orderInformation.amountDetails = amountDetails;
 
-  // Always add billing information to capture context (matching Java sample)
-  // This ensures the transient token contains billing info, so payment request doesn't need it
-  // Use safe defaults for required fields (matching Java sample pattern)
-  // Use plain object since SDK may not have Upv1capturecontextsOrderInformationBillTo class
-  const ensureValue = (val, fallback) => {
-    if (val === undefined || val === null) return fallback;
-    if (typeof val === "string" && val.trim() === "") return fallback;
-    return val;
+  // Prefill billing info ONLY when we actually have user data.
+  // If we send placeholder values here, Unified Checkout will show them in the UI which is confusing.
+  // Also, billTo is not required for capture-context generation (amountDetails is the important part).
+  const setIfNonEmpty = (obj, key, val) => {
+    if (val === undefined || val === null) return;
+    if (typeof val === "string" && val.trim() === "") return;
+    obj[key] = typeof val === "string" ? val.trim() : val;
   };
 
   // Create billTo as plain object (SDK may not have separate class for capture context billTo)
   const billTo = {};
 
-  // Map billing info fields with safe defaults (matching Java sample)
-  // CyberSource requires: buildingNumber (required), phoneNumber (min 6 chars), email (valid format)
   console.log(
     "[CAPTURE_CONTEXT] 📋 Processing billingInfo:",
     billingInfo ? JSON.stringify(billingInfo) : "null"
   );
 
   if (billingInfo) {
-    billTo.firstName = ensureValue(billingInfo.firstName, "Customer");
-    billTo.lastName = ensureValue(billingInfo.lastName, "Customer");
-    // Email must be valid format - use placeholder if empty
-    billTo.email =
-      billingInfo.email && billingInfo.email.trim()
-        ? billingInfo.email.trim()
-        : "customer@example.com";
-    // PhoneNumber must be at least 6 characters
-    billTo.phoneNumber =
-      billingInfo.phoneNumber && billingInfo.phoneNumber.trim().length >= 6
-        ? billingInfo.phoneNumber.trim()
-        : "0000000"; // 7 digits minimum to be safe
-    // Use real address values (not "N/A") - CyberSource rejects "N/A" as invalid
-    billTo.address1 = ensureValue(billingInfo.address1, "123 Main Street");
-    billTo.locality = ensureValue(billingInfo.locality, "Nairobi");
-    billTo.administrativeArea = billingInfo.administrativeArea || "";
-    billTo.postalCode = ensureValue(billingInfo.postalCode, "00000");
-    billTo.country = ensureValue(billingInfo.country, "KE");
-    // buildingNumber is required (matching Java sample)
-    billTo.buildingNumber = billingInfo.buildingNumber || "1";
+    setIfNonEmpty(billTo, "firstName", billingInfo.firstName);
+    setIfNonEmpty(billTo, "lastName", billingInfo.lastName);
+    setIfNonEmpty(billTo, "email", billingInfo.email);
+    setIfNonEmpty(billTo, "phoneNumber", billingInfo.phoneNumber);
+    setIfNonEmpty(billTo, "address1", billingInfo.address1);
+    setIfNonEmpty(billTo, "locality", billingInfo.locality);
+    setIfNonEmpty(billTo, "administrativeArea", billingInfo.administrativeArea);
+    setIfNonEmpty(billTo, "postalCode", billingInfo.postalCode);
+    setIfNonEmpty(billTo, "country", billingInfo.country);
+    setIfNonEmpty(billTo, "buildingNumber", billingInfo.buildingNumber);
 
+    // Normalize country to upper-case (if provided)
+    if (typeof billTo.country === "string") {
+      billTo.country = billTo.country.toUpperCase();
+    }
+  }
+
+  if (Object.keys(billTo).length > 0) {
+    orderInformation.billTo = billTo;
     console.log(
-      "[CAPTURE_CONTEXT] ✅ Mapped billingInfo to billTo with defaults"
-    );
-    console.log(
-      "[CAPTURE_CONTEXT]   - address1:",
-      billTo.address1,
-      "(original:",
-      billingInfo.address1,
-      ")"
-    );
-    console.log(
-      "[CAPTURE_CONTEXT]   - locality:",
-      billTo.locality,
-      "(original:",
-      billingInfo.locality,
-      ")"
-    );
-    console.log(
-      "[CAPTURE_CONTEXT]   - country:",
-      billTo.country,
-      "(original:",
-      billingInfo.country,
-      ")"
+      "[CAPTURE_CONTEXT] ✅ Added orderInformation.billTo to capture context (prefill user data)"
     );
   } else {
-    // Default values if billingInfo not provided (matching Java sample pattern)
-    // Use real address values (not "N/A") - CyberSource rejects "N/A" as invalid
-    billTo.firstName = "Customer";
-    billTo.lastName = "Customer";
-    billTo.email = "customer@example.com"; // Valid email format required
-    billTo.phoneNumber = "0000000"; // At least 6 characters required
-    billTo.address1 = "123 Main Street";
-    billTo.locality = "Nairobi";
-    billTo.administrativeArea = "";
-    billTo.postalCode = "00000";
-    billTo.country = "KE";
-    billTo.buildingNumber = "1"; // Required field (matching Java sample)
+    console.log(
+      "[CAPTURE_CONTEXT] ℹ️ No billingInfo provided (or empty) — not setting orderInformation.billTo (no prefill)"
+    );
   }
-
-  // Normalize country to upper-case
-  if (typeof billTo.country === "string") {
-    billTo.country = billTo.country.toUpperCase();
-  }
-
-  orderInformation.billTo = billTo;
-  console.log(
-    "[CAPTURE_CONTEXT] ✅ Added orderInformation.billTo to capture context (matching Java sample)"
-  );
 
   // IMPORTANT (per Unified Checkout docs): orderInformation must be nested under "data"
   // (data.orderInformation.amountDetails.currency/totalAmount are required fields).
