@@ -244,11 +244,13 @@ router.post("/callback", async (req, res) => {
 
     console.log(`[mpesa_callback] ResultCode: ${resultCode}`);
     console.log(`[mpesa_callback] CheckoutRequestID: ${checkoutRequestId}`);
+    console.log(`[mpesa_callback] ResultDesc: ${resultDesc}`);
 
     // Extract metadata
     let amount = null;
     let paymentIdFromRef = null;
     let receiptNumber = null;
+    let phoneNumber = null;
 
     for (const item of metadataItems) {
       if (item.Name === "Amount") {
@@ -257,8 +259,14 @@ router.post("/callback", async (req, res) => {
         paymentIdFromRef = item.Value;
       } else if (item.Name === "MpesaReceiptNumber") {
         receiptNumber = item.Value;
+      } else if (item.Name === "PhoneNumber") {
+        phoneNumber = item.Value;
       }
     }
+
+    console.log(
+      `[mpesa_callback] Metadata: amount=${amount}, receipt=${receiptNumber}, phone=${phoneNumber}, accountRef=${paymentIdFromRef}`
+    );
 
     // Find payment by CheckoutRequestID
     let payment = null;
@@ -344,16 +352,26 @@ router.post("/callback", async (req, res) => {
       return res.json({ status: "ok" });
     } else {
       console.log(`[mpesa_callback] ❌ Payment failed (ResultCode: ${resultCode})`);
+      const now = new Date().toISOString();
       await db.ref(`payments/${paymentId}`).update({
         status: "failed",
         provider_data: stk,
-        completed_at: new Date().toISOString(),
-        failure_reason: resultDesc,
+        completed_at: now,
+        failure_reason: resultDesc || null,
+        failure_code: resultCode,
+        receipt_number: receiptNumber || null,
+        callback_amount: amount || null,
+        callback_phone: phoneNumber || null,
       });
       return res.json({
         status: "failed",
         result_code: resultCode,
         result_desc: resultDesc,
+        checkout_request_id: checkoutRequestId,
+        payment_id: paymentId,
+        receipt_number: receiptNumber || null,
+        amount: amount || null,
+        phone: phoneNumber || null,
       });
     }
   } catch (error) {
