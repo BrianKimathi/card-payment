@@ -67,18 +67,32 @@ function formatPhoneNumber(phone) {
 router.post("/initiate", requireAuth, async (req, res) => {
   try {
     console.log("[mpesa_initiate] ========== M-Pesa Payment Initiation ==========");
-    console.log(`[mpesa_initiate] Timestamp: ${new Date().toISOString()}`);
+    const requestTimestamp = new Date().toISOString();
+    console.log(`[mpesa_initiate] Timestamp: ${requestTimestamp}`);
     console.log(`[mpesa_initiate] Request method: ${req.method}`);
     console.log(`[mpesa_initiate] Request URL: ${req.url}`);
 
     if (!mpesaClient) {
       console.log("[mpesa_initiate] ❌ M-Pesa not configured");
-      return res.status(503).json({ error: "M-Pesa not configured" });
+      return res.status(503).json({
+        error: "M-Pesa not configured",
+        debug: {
+          timestamp: requestTimestamp,
+          provider: "mpesa",
+          env: config.MPESA_ENV,
+        },
+      });
     }
 
     if (!db) {
       console.log("[mpesa_initiate] ❌ Database not available");
-      return res.status(503).json({ error: "Database unavailable" });
+      return res.status(503).json({
+        error: "Database unavailable",
+        debug: {
+          timestamp: requestTimestamp,
+          provider: "mpesa",
+        },
+      });
     }
 
     const { amount, phone: phoneRaw } = req.body;
@@ -92,6 +106,12 @@ router.post("/initiate", requireAuth, async (req, res) => {
     if (isNaN(amountFloat) || amountFloat < config.VALIDATION_RULES.min_amount) {
       return res.status(400).json({
         error: `Minimum amount is KES ${config.VALIDATION_RULES.min_amount}`,
+        debug: {
+          timestamp: requestTimestamp,
+          provider: "mpesa",
+          amount_raw: amount,
+          min_amount: config.VALIDATION_RULES.min_amount,
+        },
       });
     }
 
@@ -99,6 +119,11 @@ router.post("/initiate", requireAuth, async (req, res) => {
     if (!phone) {
       return res.status(400).json({
         error: "Invalid phone number. Must start with +254, 254, 07, or 01",
+        debug: {
+          timestamp: requestTimestamp,
+          provider: "mpesa",
+          phone_raw: phoneRaw,
+        },
       });
     }
 
@@ -145,6 +170,14 @@ router.post("/initiate", requireAuth, async (req, res) => {
       return res.status(500).json({
         error: "Failed to initiate M-Pesa",
         details: result,
+        debug: {
+          timestamp: requestTimestamp,
+          provider: "mpesa",
+          env: config.MPESA_ENV,
+          amount: amountFloat,
+          phone_e164: phone,
+          payment_id: paymentId,
+        },
       });
     }
 
@@ -162,6 +195,15 @@ router.post("/initiate", requireAuth, async (req, res) => {
       status: "pending",
       credit_days: creditDays,
       mpesa: result.response,
+      debug: {
+        timestamp: requestTimestamp,
+        provider: "mpesa",
+        env: config.MPESA_ENV,
+        amount: amountFloat,
+        phone_e164: phone,
+        checkout_request_id: checkoutRequestId || null,
+        callback_url: config.MPESA_CALLBACK_URL,
+      },
     });
   } catch (error) {
     console.error(`[mpesa_initiate] ERROR: ${error.message}`);
@@ -169,6 +211,9 @@ router.post("/initiate", requireAuth, async (req, res) => {
     return res.status(500).json({
       error: "Internal server error",
       message: error.message,
+      debug: {
+        provider: "mpesa",
+      },
     });
   }
 });
