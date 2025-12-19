@@ -424,12 +424,9 @@ async function generateCaptureContext(options = {}) {
         postalCode: ensureValue(billTo.postalCode, "00000"),
         country: billTo.country.trim().toUpperCase(),
         buildingNumber: ensureValue(billTo.buildingNumber, "1"),
+        // administrativeArea is REQUIRED when billTo is included (per CyberSource validation)
+        administrativeArea: ensureValue(billTo.administrativeArea, "Nairobi"),
       };
-
-      // Add optional fields if present
-      if (billTo.administrativeArea) {
-        completeBillTo.administrativeArea = billTo.administrativeArea.trim();
-      }
 
       orderInformation.billTo = completeBillTo;
       console.log(
@@ -578,6 +575,10 @@ async function generateCaptureContext(options = {}) {
     console.log(
       "[CAPTURE_CONTEXT]   - buildingNumber:",
       requestObj.data.orderInformation.billTo.buildingNumber || "MISSING"
+    );
+    console.log(
+      "[CAPTURE_CONTEXT]   - administrativeArea:",
+      requestObj.data.orderInformation.billTo.administrativeArea || "MISSING"
     );
 
     // Log the actual billTo object structure
@@ -2396,9 +2397,9 @@ async function chargeUnifiedCheckoutToken({
 
   // For Google Pay, we still need paymentSolution
   if (paymentType === "GOOGLEPAY") {
-    const processingInformation =
-      new cybersourceRestApi.Ptsv2paymentsProcessingInformation();
-    processingInformation.capture = true;
+  const processingInformation =
+    new cybersourceRestApi.Ptsv2paymentsProcessingInformation();
+  processingInformation.capture = true;
     processingInformation.paymentSolution = "012";
     requestObj.processingInformation = processingInformation;
     console.log("[UNIFIED_CHECKOUT] Payment Solution: 012 (Google Pay token)");
@@ -2413,36 +2414,36 @@ async function chargeUnifiedCheckoutToken({
       new cybersourceRestApi.Ptsv2paymentsProcessingInformation();
     processingInformation.capture = true;
     processingInformation.commerceIndicator = "internet"; // Transaction type: internet (e-commerce)
-    requestObj.processingInformation = processingInformation;
+  requestObj.processingInformation = processingInformation;
 
-    const orderInformation =
-      new cybersourceRestApi.Ptsv2paymentsOrderInformation();
+  const orderInformation =
+    new cybersourceRestApi.Ptsv2paymentsOrderInformation();
     const orderInformationAmountDetails =
-      new cybersourceRestApi.Ptsv2paymentsOrderInformationAmountDetails();
+    new cybersourceRestApi.Ptsv2paymentsOrderInformationAmountDetails();
     // TEMPORARY WORKAROUND: Convert 2.00 to 2.01 to bypass CyberSource discount rule
     orderInformationAmountDetails.totalAmount = applyAmountWorkaround(amount);
     orderInformationAmountDetails.currency = currency;
     orderInformation.amountDetails = orderInformationAmountDetails;
 
     // Add billing information with safe defaults
-    const orderInformationBillTo =
-      new cybersourceRestApi.Ptsv2paymentsOrderInformationBillTo();
+  const orderInformationBillTo =
+    new cybersourceRestApi.Ptsv2paymentsOrderInformationBillTo();
 
-    const ensureValue = (val, fallback) => {
-      if (val === undefined || val === null) return fallback;
-      if (typeof val === "string" && val.trim() === "") return fallback;
-      return val;
-    };
+  const ensureValue = (val, fallback) => {
+    if (val === undefined || val === null) return fallback;
+    if (typeof val === "string" && val.trim() === "") return fallback;
+    return val;
+  };
 
     if (billingInfo) {
       orderInformationBillTo.firstName = ensureValue(
         billingInfo.firstName,
         "Customer"
-      );
-      orderInformationBillTo.lastName = ensureValue(
+  );
+  orderInformationBillTo.lastName = ensureValue(
         billingInfo.lastName,
-        "Customer"
-      );
+    "Customer"
+  );
       orderInformationBillTo.email =
         billingInfo.email && billingInfo.email.trim()
           ? billingInfo.email.trim()
@@ -2461,10 +2462,10 @@ async function chargeUnifiedCheckoutToken({
       );
       orderInformationBillTo.administrativeArea =
         billingInfo.administrativeArea || "";
-      orderInformationBillTo.postalCode = ensureValue(
+  orderInformationBillTo.postalCode = ensureValue(
         billingInfo.postalCode,
         "00000"
-      );
+  );
       orderInformationBillTo.country = ensureValue(billingInfo.country, "KE");
       orderInformationBillTo.buildingNumber =
         billingInfo.buildingNumber || "1";
@@ -2483,10 +2484,10 @@ async function chargeUnifiedCheckoutToken({
     }
 
     // Normalize country to upper-case
-    if (typeof orderInformationBillTo.country === "string") {
+  if (typeof orderInformationBillTo.country === "string") {
       orderInformationBillTo.country =
         orderInformationBillTo.country.toUpperCase();
-    }
+  }
 
     orderInformation.billTo = orderInformationBillTo;
     requestObj.orderInformation = orderInformation;
@@ -2563,7 +2564,7 @@ async function chargeUnifiedCheckoutToken({
     );
     const consumerAuthenticationInformation =
       new cybersourceRestApi.Ptsv2paymentsConsumerAuthenticationInformation();
-    
+
     // REQUIRED FIELDS for 3D Secure pass-through (per Unified Checkout Developer Guide)
     // These fields are required when using completeMandate.consumerAuthentication: true
     // Without these, the acquirer/aggregator will reject with CARD_CATEGORY_ECI_REFUSED
@@ -2595,24 +2596,24 @@ async function chargeUnifiedCheckoutToken({
     // Include 3DS authentication fields from completeResponse (per developer guide page 163)
     if (authEcommerceIndicator) {
       consumerAuthenticationInformation.ecommerceIndicator = authEcommerceIndicator;
-      console.log(
+    console.log(
         `[UNIFIED_CHECKOUT]   - E-commerce Indicator (ECI): ${authEcommerceIndicator}`
-      );
+    );
     }
 
     if (authCavv) {
       consumerAuthenticationInformation.cavv = authCavv;
-      console.log(
+    console.log(
         `[UNIFIED_CHECKOUT]   - CAVV: Present (${authCavv.length} chars)`
       );
     }
 
     if (authUcafCollectionIndicator) {
       consumerAuthenticationInformation.ucafCollectionIndicator = authUcafCollectionIndicator;
-      console.log(
+    console.log(
         `[UNIFIED_CHECKOUT]   - UCAF Collection Indicator (UCSF): ${authUcafCollectionIndicator}`
-      );
-    }
+    );
+  }
 
     if (authUcafAuthenticationData) {
       consumerAuthenticationInformation.ucafAuthenticationData = authUcafAuthenticationData;
@@ -2623,14 +2624,14 @@ async function chargeUnifiedCheckoutToken({
 
     if (authXid) {
       consumerAuthenticationInformation.xid = authXid;
-      console.log(
+    console.log(
         `[UNIFIED_CHECKOUT]   - XID: ${authXid}`
       );
     }
 
     if (authSpecificationVersion) {
       consumerAuthenticationInformation.specificationVersion = authSpecificationVersion;
-      console.log(
+    console.log(
         `[UNIFIED_CHECKOUT]   - Specification Version: ${authSpecificationVersion}`
       );
     }
@@ -2645,9 +2646,9 @@ async function chargeUnifiedCheckoutToken({
     requestObj.consumerAuthenticationInformation =
       consumerAuthenticationInformation;
   } else {
-    console.log(
+      console.log(
       "[UNIFIED_CHECKOUT] ⚠️ No 3D Secure authentication data provided"
-    );
+      );
   }
 
   // CRITICAL: When using transient tokens (both transientToken and transientTokenJwt),
@@ -3000,9 +3001,9 @@ async function chargeUnifiedCheckoutToken({
       "[UNIFIED_CHECKOUT] 📦 Sending plain JSON request to SDK createPayment (workaround for serialization issues)"
     );
     result = await promisify(
-      instance.createPayment.bind(instance),
+    instance.createPayment.bind(instance),
       plainRequestObj
-    );
+  );
   } catch (error) {
     // #region agent log
     // Instrumentation: Log caught error
@@ -3149,14 +3150,14 @@ async function chargeUnifiedCheckoutToken({
   const responseTotalAmount = responseAmountDetails.totalAmount;
   const responseCurrency = responseAmountDetails.currency;
 
-  console.log(`[UNIFIED_CHECKOUT] Amount Details:`);
+    console.log(`[UNIFIED_CHECKOUT] Amount Details:`);
   console.log(`[UNIFIED_CHECKOUT]   - Requested: ${amount} ${currency}`);
-  console.log(
+    console.log(
     `[UNIFIED_CHECKOUT]   - Response authorizedAmount: ${
       responseAuthorizedAmount ?? "N/A"
     } ${responseCurrency ?? currency}`
-  );
-  console.log(
+    );
+    console.log(
     `[UNIFIED_CHECKOUT]   - Response totalAmount: ${
       responseTotalAmount ?? "N/A"
     } ${responseCurrency ?? currency}`
