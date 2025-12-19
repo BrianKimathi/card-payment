@@ -383,32 +383,47 @@ async function generateCaptureContext(options = {}) {
   }
 
   if (Object.keys(billTo).length > 0) {
-    // IMPORTANT: CyberSource validates required billTo fields if billTo is present.
-    // So we only include billTo when we have a complete set of required fields.
-    const requiredFields = [
-      "firstName",
-      "lastName",
-      "email",
-      "phoneNumber",
-      "address1",
-      "locality",
-      "postalCode",
-      "country",
-      "buildingNumber",
-    ];
-    const missingRequired = requiredFields.filter(
-      (k) => !billTo[k] || (typeof billTo[k] === "string" && billTo[k].trim() === "")
-    );
+    // Include billTo with available fields, using safe defaults for missing required fields.
+    // This helps Decision Manager evaluate transactions properly.
+    // Minimum required: firstName, lastName, email, country
+    const hasMinimumFields = 
+      billTo.firstName && billTo.firstName.trim() &&
+      billTo.lastName && billTo.lastName.trim() &&
+      billTo.email && billTo.email.trim() &&
+      billTo.country && billTo.country.trim();
 
-    if (missingRequired.length === 0) {
-      orderInformation.billTo = billTo;
+    if (hasMinimumFields) {
+      // Use safe defaults for missing required fields
+      const ensureValue = (val, fallback) => {
+        if (val === undefined || val === null) return fallback;
+        if (typeof val === "string" && val.trim() === "") return fallback;
+        return val;
+      };
+
+      const completeBillTo = {
+        firstName: billTo.firstName.trim(),
+        lastName: billTo.lastName.trim(),
+        email: billTo.email.trim(),
+        phoneNumber: ensureValue(billTo.phoneNumber, "0000000"),
+        address1: ensureValue(billTo.address1, "123 Main Street"),
+        locality: ensureValue(billTo.locality, "Nairobi"),
+        postalCode: ensureValue(billTo.postalCode, "00000"),
+        country: billTo.country.trim().toUpperCase(),
+        buildingNumber: ensureValue(billTo.buildingNumber, "1"),
+      };
+
+      // Add optional fields if present
+      if (billTo.administrativeArea) {
+        completeBillTo.administrativeArea = billTo.administrativeArea.trim();
+      }
+
+      orderInformation.billTo = completeBillTo;
       console.log(
-        "[CAPTURE_CONTEXT] ✅ Added orderInformation.billTo to capture context (prefill user data)"
+        "[CAPTURE_CONTEXT] ✅ Added orderInformation.billTo to capture context (with safe defaults for missing fields)"
       );
     } else {
       console.warn(
-        "[CAPTURE_CONTEXT] ⚠️ Partial billingInfo provided but required fields are missing; omitting billTo to avoid validation errors:",
-        missingRequired
+        "[CAPTURE_CONTEXT] ⚠️ Insufficient billingInfo (missing firstName, lastName, email, or country); omitting billTo"
       );
     }
   } else {
