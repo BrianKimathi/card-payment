@@ -373,20 +373,35 @@ app.post("/api/payer-auth/enroll", async (req, res) => {
  * Used when you want to set up authentication without processing a payment.
  */
 app.post("/api/payer-auth/setup", async (req, res) => {
+  const startTime = Date.now();
+  console.log(
+    "[API] POST /api/payer-auth/setup - Payer authentication setup request received"
+  );
+
   try {
     const { card, transientToken, referenceCode, billingInfo } = req.body || {};
 
+    console.log("[API] Request validation...");
     if (!card && !transientToken) {
+      console.log("[API] ❌ Validation failed: Either card or transientToken is required");
       return res.status(400).json({
         error: "Either card or transientToken is required",
       });
     }
+    console.log("[API] ✅ Request validated");
 
     logJson("PA_SETUP_REQUEST", {
       hasCard: !!card,
       hasTransientToken: !!transientToken,
       referenceCode,
+      cardLast4: card?.number ? card.number.slice(-4) : "N/A",
+      transientTokenLength: transientToken?.length || 0,
     });
+
+    console.log("[API] Calling payerAuthSetup...");
+    console.log(`[API]   - Has card: ${!!card}`);
+    console.log(`[API]   - Has transient token: ${!!transientToken}`);
+    console.log(`[API]   - Reference code: ${referenceCode || "N/A"}`);
 
     const result = await payerAuthSetup({
       card,
@@ -395,10 +410,28 @@ app.post("/api/payer-auth/setup", async (req, res) => {
       billingInfo,
     });
 
+    const duration = Date.now() - startTime;
+    console.log(`[API] ✅ Setup completed in ${duration}ms`);
+    console.log(`[API] Response Status: ${result.response?.status || 200}`);
+    
+    if (result?.data?.status) {
+      console.log(`[API]   - Status: ${result.data.status}`);
+    }
+    if (result?.data?.consumerAuthenticationInformation?.authenticationTransactionId) {
+      console.log(`[API]   - Auth Transaction ID: ${result.data.consumerAuthenticationInformation.authenticationTransactionId}`);
+    }
+
     logJson("PA_SETUP_RESPONSE", result?.data || {});
     res.status(result.response?.status || 200).json(result.data);
   } catch (err) {
+    const duration = Date.now() - startTime;
     const status = err.response?.status || 500;
+    console.log(`[API] ❌ Setup failed after ${duration}ms`);
+    console.log(`[API] Error Status: ${status}`);
+    console.log(
+      `[API] Error Message: ${err.error || err.message || "Unknown error"}`
+    );
+
     logJson("PA_SETUP_ERROR", {
       status,
       message: err.error || err.message,
@@ -416,6 +449,11 @@ app.post("/api/payer-auth/setup", async (req, res) => {
  * Call this after the user completes the 3D Secure challenge.
  */
 app.post("/api/payer-auth/validate", async (req, res) => {
+  const startTime = Date.now();
+  console.log(
+    "[API] POST /api/payer-auth/validate - Authentication validation request received"
+  );
+
   try {
     const {
       authenticationTransactionId,
@@ -426,7 +464,9 @@ app.post("/api/payer-auth/validate", async (req, res) => {
       referenceCode,
     } = req.body || {};
 
+    console.log("[API] Request validation...");
     if (!authenticationTransactionId) {
+      console.log("[API] ❌ Validation failed: authenticationTransactionId is required");
       return res.status(400).json({
         error: "authenticationTransactionId is required",
       });
@@ -439,10 +479,12 @@ app.post("/api/payer-auth/validate", async (req, res) => {
       !card?.expirationMonth ||
       !card?.expirationYear
     ) {
+      console.log("[API] ❌ Validation failed: Missing required fields");
       return res.status(400).json({
         error: "Missing required fields: amount, currency, card details",
       });
     }
+    console.log("[API] ✅ Request validated");
 
     logJson("PA_VALIDATE_REQUEST", {
       authenticationTransactionId,
@@ -451,6 +493,12 @@ app.post("/api/payer-auth/validate", async (req, res) => {
       cardLast4: card.number.slice(-4),
       referenceCode,
     });
+
+    console.log("[API] Calling validateAuthenticationResults...");
+    console.log(`[API]   - Auth Transaction ID: ${authenticationTransactionId}`);
+    console.log(`[API]   - Amount: ${amount} ${currency}`);
+    console.log(`[API]   - Card: ****${card.number.slice(-4)}`);
+    console.log(`[API]   - Reference code: ${referenceCode || "N/A"}`);
 
     const result = await validateAuthenticationResults({
       authenticationTransactionId,
@@ -461,10 +509,32 @@ app.post("/api/payer-auth/validate", async (req, res) => {
       referenceCode,
     });
 
+    const duration = Date.now() - startTime;
+    console.log(`[API] ✅ Validation completed in ${duration}ms`);
+    console.log(`[API] Response Status: ${result.response?.status || 200}`);
+    
+    if (result?.data?.status) {
+      console.log(`[API]   - Status: ${result.data.status}`);
+    }
+    if (result?.data?.consumerAuthenticationInformation?.authenticationResult) {
+      const authResult = result.data.consumerAuthenticationInformation.authenticationResult;
+      console.log(`[API]   - Authentication Result: ${authResult} (Y=authenticated, N=not authenticated, U=unavailable)`);
+    }
+    if (result?.data?.consumerAuthenticationInformation?.ecommerceIndicator) {
+      console.log(`[API]   - ECI: ${result.data.consumerAuthenticationInformation.ecommerceIndicator}`);
+    }
+
     logJson("PA_VALIDATE_RESPONSE", result?.data || {});
     res.status(result.response?.status || 200).json(result.data);
   } catch (err) {
+    const duration = Date.now() - startTime;
     const status = err.response?.status || 500;
+    console.log(`[API] ❌ Validation failed after ${duration}ms`);
+    console.log(`[API] Error Status: ${status}`);
+    console.log(
+      `[API] Error Message: ${err.error || err.message || "Unknown error"}`
+    );
+
     logJson("PA_VALIDATE_ERROR", {
       status,
       message: err.error || err.message,
@@ -482,15 +552,23 @@ app.post("/api/payer-auth/validate", async (req, res) => {
  * This matches the Java sample Risk API 3DS flow but uses the UC token.
  */
 app.post("/api/unified-checkout/payer-auth/enroll", async (req, res) => {
+  const startTime = Date.now();
+  console.log(
+    "[API] POST /api/unified-checkout/payer-auth/enroll - Unified Checkout enrollment check request received"
+  );
+
   try {
     const { transientToken, amount, currency, billingInfo, referenceCode } =
       req.body || {};
 
+    console.log("[API] Request validation...");
     if (!transientToken || !amount || !currency) {
+      console.log("[API] ❌ Validation failed: Missing required fields");
       return res.status(400).json({
         error: "transientToken, amount, and currency are required",
       });
     }
+    console.log("[API] ✅ Request validated");
 
     logJson("UC_PA_ENROLL_REQUEST", {
       amount,
@@ -500,6 +578,12 @@ app.post("/api/unified-checkout/payer-auth/enroll", async (req, res) => {
       transientTokenLength: transientToken.length,
     });
 
+    console.log("[API] Calling checkPayerAuthEnrollmentWithToken...");
+    console.log(`[API]   - Amount: ${amount} ${currency}`);
+    console.log(`[API]   - Transient token length: ${transientToken.length}`);
+    console.log(`[API]   - Reference code: ${referenceCode || "N/A"}`);
+    console.log(`[API]   - Has billing info: ${!!billingInfo}`);
+
     const result = await checkPayerAuthEnrollmentWithToken({
       transientTokenJwt: transientToken,
       amount,
@@ -508,10 +592,31 @@ app.post("/api/unified-checkout/payer-auth/enroll", async (req, res) => {
       referenceCode,
     });
 
+    const duration = Date.now() - startTime;
+    console.log(`[API] ✅ Unified Checkout enrollment check completed in ${duration}ms`);
+    console.log(`[API] Response Status: ${result.response?.status || 200}`);
+    
+    if (result?.data?.status) {
+      console.log(`[API]   - Status: ${result.data.status}`);
+    }
+    if (result?.data?.consumerAuthenticationInformation?.veresEnrolled) {
+      console.log(`[API]   - Veres Enrolled: ${result.data.consumerAuthenticationInformation.veresEnrolled}`);
+    }
+    if (result?.data?.consumerAuthenticationInformation?.authenticationTransactionId) {
+      console.log(`[API]   - Auth Transaction ID: ${result.data.consumerAuthenticationInformation.authenticationTransactionId}`);
+    }
+
     logJson("UC_PA_ENROLL_RESPONSE", result?.data || {});
     res.status(result.response?.status || 200).json(result.data);
   } catch (err) {
+    const duration = Date.now() - startTime;
     const status = err.response?.status || 500;
+    console.log(`[API] ❌ Unified Checkout enrollment check failed after ${duration}ms`);
+    console.log(`[API] Error Status: ${status}`);
+    console.log(
+      `[API] Error Message: ${err.error || err.message || "Unknown error"}`
+    );
+
     logJson("UC_PA_ENROLL_ERROR", {
       status,
       message: err.error || err.message,
@@ -528,29 +633,63 @@ app.post("/api/unified-checkout/payer-auth/enroll", async (req, res) => {
 });
 
 app.post("/api/unified-checkout/payer-auth/validate", async (req, res) => {
+  const startTime = Date.now();
+  console.log(
+    "[API] POST /api/unified-checkout/payer-auth/validate - Unified Checkout validation request received"
+  );
+
   try {
     const { transientToken, authenticationTransactionId } = req.body || {};
 
+    console.log("[API] Request validation...");
     if (!transientToken || !authenticationTransactionId) {
+      console.log("[API] ❌ Validation failed: Missing required fields");
       return res.status(400).json({
         error: "transientToken and authenticationTransactionId are required",
       });
     }
+    console.log("[API] ✅ Request validated");
 
     logJson("UC_PA_VALIDATE_REQUEST", {
       authenticationTransactionId,
       transientTokenLength: transientToken.length,
     });
 
+    console.log("[API] Calling validateAuthenticationResultsWithToken...");
+    console.log(`[API]   - Auth Transaction ID: ${authenticationTransactionId}`);
+    console.log(`[API]   - Transient token length: ${transientToken.length}`);
+
     const result = await validateAuthenticationResultsWithToken({
       transientTokenJwt: transientToken,
       authenticationTransactionId,
     });
 
+    const duration = Date.now() - startTime;
+    console.log(`[API] ✅ Unified Checkout validation completed in ${duration}ms`);
+    console.log(`[API] Response Status: ${result.response?.status || 200}`);
+    
+    if (result?.data?.status) {
+      console.log(`[API]   - Status: ${result.data.status}`);
+    }
+    if (result?.data?.consumerAuthenticationInformation?.authenticationResult) {
+      const authResult = result.data.consumerAuthenticationInformation.authenticationResult;
+      console.log(`[API]   - Authentication Result: ${authResult} (Y=authenticated, N=not authenticated, U=unavailable)`);
+    }
+    if (result?.data?.consumerAuthenticationInformation?.ecommerceIndicator) {
+      console.log(`[API]   - ECI: ${result.data.consumerAuthenticationInformation.ecommerceIndicator}`);
+    }
+
     logJson("UC_PA_VALIDATE_RESPONSE", result?.data || {});
     res.status(result.response?.status || 200).json(result.data);
   } catch (err) {
+    const duration = Date.now() - startTime;
     const status = err.response?.status || 500;
+    console.log(`[API] ❌ Unified Checkout validation failed after ${duration}ms`);
+    console.log(`[API] Error Status: ${status}`);
+    console.log(
+      `[API] Error Message: ${err.error || err.message || "Unknown error"}`
+    );
+
     logJson("UC_PA_VALIDATE_ERROR", {
       status,
       message: err.error || err.message,
@@ -561,6 +700,151 @@ app.post("/api/unified-checkout/payer-auth/validate", async (req, res) => {
         err.error ||
         err.message ||
         "Unified Checkout authentication validation failed",
+      responseBody: err.response?.text,
+    });
+  }
+});
+
+/**
+ * Validate 3D Secure authentication and complete payment in one call.
+ * This endpoint validates authentication results and then processes payment.
+ * Used after user completes 3D Secure challenge.
+ */
+app.post("/api/payer-auth/validate-and-complete", async (req, res) => {
+  const startTime = Date.now();
+  console.log(
+    "[API] POST /api/payer-auth/validate-and-complete - Validate and complete payment request received"
+  );
+
+  try {
+    const {
+      authenticationTransactionId,
+      amount,
+      currency,
+      card,
+      billingInfo,
+      referenceCode,
+      capture = true,
+    } = req.body || {};
+
+    console.log("[API] Request validation...");
+    if (!authenticationTransactionId) {
+      console.log("[API] ❌ Validation failed: authenticationTransactionId is required");
+      return res.status(400).json({
+        error: "authenticationTransactionId is required",
+      });
+    }
+
+    if (
+      !amount ||
+      !currency ||
+      !card?.number ||
+      !card?.expirationMonth ||
+      !card?.expirationYear
+    ) {
+      console.log("[API] ❌ Validation failed: Missing required fields");
+      return res.status(400).json({
+        error: "Missing required fields: amount, currency, card details",
+      });
+    }
+    console.log("[API] ✅ Request validated");
+
+    logJson("PA_VALIDATE_COMPLETE_REQUEST", {
+      authenticationTransactionId,
+      amount,
+      currency,
+      cardLast4: card.number.slice(-4),
+      referenceCode,
+      capture,
+    });
+
+    // Step 1: Validate authentication results
+    console.log("[API] 🔍 Step 1: Validating authentication results...");
+    console.log(`[API]   - Auth Transaction ID: ${authenticationTransactionId}`);
+    console.log(`[API]   - Amount: ${amount} ${currency}`);
+    console.log(`[API]   - Card: ****${card.number.slice(-4)}`);
+
+    let validationResult;
+    try {
+      validationResult = await validateAuthenticationResults({
+        authenticationTransactionId,
+        amount,
+        currency,
+        card,
+        billingInfo,
+        referenceCode,
+      });
+
+      const validationStatus = validationResult?.data?.status?.toUpperCase();
+      const authResult = validationResult?.data?.consumerAuthenticationInformation?.authenticationResult?.toUpperCase();
+      
+      console.log(`[API] ✅ Authentication validation completed`);
+      console.log(`[API]   - Validation Status: ${validationStatus}`);
+      console.log(`[API]   - Authentication Result: ${authResult} (Y=authenticated, N=not authenticated, U=unavailable)`);
+
+      if (validationStatus !== 'AUTHENTICATION_SUCCESSFUL' || authResult !== 'Y') {
+        console.log(`[API] ❌ Authentication validation failed or not authenticated`);
+        return res.status(400).json({
+          error: "3D Secure authentication failed or was not completed",
+          validation_status: validationStatus,
+          authentication_result: authResult,
+        });
+      }
+
+      console.log(`[API] ✅ Authentication validated successfully`);
+    } catch (validateErr) {
+      console.log(`[API] ❌ Authentication validation failed: ${validateErr.message}`);
+      return res.status(validateErr.response?.status || 400).json({
+        error: `Authentication validation failed: ${validateErr.message || validateErr.error}`,
+        responseBody: validateErr.response?.text,
+      });
+    }
+
+    // Step 2: Process payment with validated authentication
+    console.log("[API] 🚀 Step 2: Processing payment with validated authentication...");
+    
+    const authResult = validationResult?.data?.consumerAuthenticationInformation?.authenticationResult || 'Y';
+    
+    const paymentResult = await createCardPaymentWithAuth({
+      amount,
+      currency,
+      card,
+      billingInfo,
+      referenceCode,
+      capture,
+      authenticationTransactionId,
+      authenticationResult: authResult,
+    });
+
+    const duration = Date.now() - startTime;
+    console.log(`[API] ✅ Validate and complete finished in ${duration}ms`);
+    console.log(`[API] Response Status: ${paymentResult.response?.status || 200}`);
+    
+    if (paymentResult?.data?.id) {
+      console.log(`[API]   - Transaction ID: ${paymentResult.data.id}`);
+    }
+    if (paymentResult?.data?.status) {
+      console.log(`[API]   - Payment Status: ${paymentResult.data.status}`);
+    }
+
+    logJson("PA_VALIDATE_COMPLETE_RESPONSE", paymentResult?.data || {});
+    res.status(paymentResult.response?.status || 200).json(paymentResult.data);
+  } catch (err) {
+    const duration = Date.now() - startTime;
+    const status = err.response?.status || 500;
+    console.log(`[API] ❌ Validate and complete failed after ${duration}ms`);
+    console.log(`[API] Error Status: ${status}`);
+    console.log(
+      `[API] Error Message: ${err.error || err.message || "Unknown error"}`
+    );
+
+    logJson("PA_VALIDATE_COMPLETE_ERROR", {
+      status,
+      message: err.error || err.message,
+      responseBody: err.response?.text,
+    });
+    res.status(status).json({
+      error: err.error || err.message || "Validate and complete payment failed",
       responseBody: err.response?.text,
     });
   }

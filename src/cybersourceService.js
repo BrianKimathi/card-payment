@@ -7,6 +7,20 @@ const configuration = require(path.resolve("Configuration.js"));
 function createApiClients() {
   const configObject = new configuration();
   const apiClient = new cybersourceRestApi.ApiClient();
+  
+  // Explicitly set the base path based on runEnvironment
+  // This ensures we use the correct environment (sandbox vs production)
+  const runEnvironment = configObject.runEnvironment || "apitest.cybersource.com";
+  const basePath = `https://${runEnvironment}`;
+  apiClient.basePath = basePath;
+  
+  // Log the configuration for debugging (only log first 20 chars of key ID for security)
+  console.log(`[API_CLIENT] Using environment: ${runEnvironment}`);
+  console.log(`[API_CLIENT] Base path: ${basePath}`);
+  console.log(`[API_CLIENT] Merchant ID: ${configObject.merchantID || "NOT SET"}`);
+  console.log(`[API_CLIENT] Merchant Key ID: ${configObject.merchantKeyId ? configObject.merchantKeyId.substring(0, 20) + "..." : "NOT SET"}`);
+  console.log(`[API_CLIENT] Auth Type: ${configObject.authenticationType || "NOT SET"}`);
+  
   return { configObject, apiClient };
 }
 
@@ -2549,6 +2563,18 @@ async function chargeUnifiedCheckoutToken({
     );
     const consumerAuthenticationInformation =
       new cybersourceRestApi.Ptsv2paymentsConsumerAuthenticationInformation();
+    
+    // REQUIRED FIELDS for 3D Secure pass-through (per Unified Checkout Developer Guide)
+    // These fields are required when using completeMandate.consumerAuthentication: true
+    // Without these, the acquirer/aggregator will reject with CARD_CATEGORY_ECI_REFUSED
+    consumerAuthenticationInformation.challengeCode = "01"; // Required: "01" for payment authentication
+    consumerAuthenticationInformation.messageCategory = "01"; // Required: "01" for payment authentication (not non-payment)
+    console.log(
+      `[UNIFIED_CHECKOUT]   - Challenge Code: 01 (required for 3DS pass-through)`
+    );
+    console.log(
+      `[UNIFIED_CHECKOUT]   - Message Category: 01 (payment authentication)`
+    );
     
     if (authenticationTransactionId) {
       consumerAuthenticationInformation.authenticationTransactionId =
