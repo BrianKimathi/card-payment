@@ -2071,6 +2071,126 @@ async function chargeUnifiedCheckoutToken({
     }`
   );
 
+  // Extract 3DS authentication fields from completeResponse JWT
+  let decodedCompleteResponse = null;
+  let authEcommerceIndicator = null;
+  let authCavv = null;
+  let authUcafCollectionIndicator = null;
+  let authUcafAuthenticationData = null; // AAV for Mastercard
+  let authXid = null;
+  let authSpecificationVersion = null;
+  let authDirectoryServerTransactionId = null;
+
+  // Check completeResponse JWT for early rejection (e.g., DAGGREJECTED) and extract 3DS fields
+  if (completeResponse && typeof completeResponse === "string" && completeResponse.includes(".")) {
+    try {
+      const parts = completeResponse.split(".");
+      if (parts.length === 3) {
+        // Decode JWT payload (handle base64url padding)
+        let base64Url = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+        // Add padding if needed
+        while (base64Url.length % 4) {
+          base64Url += "=";
+        }
+        const payload = JSON.parse(Buffer.from(base64Url, "base64").toString());
+
+        decodedCompleteResponse = payload;
+
+        const status = payload.status || payload.outcome;
+        const errorReason = payload.details?.errorInformation?.reason;
+        const errorMessage = payload.message;
+
+        console.log(`[UNIFIED_CHECKOUT] 🔍 Complete Response Status: ${status}`);
+        console.log(`[UNIFIED_CHECKOUT] 🔍 Complete Response Error Reason: ${errorReason || "None"}`);
+        console.log(`[UNIFIED_CHECKOUT] 🔍 Complete Response Message: ${errorMessage || "None"}`);
+
+        // Status "201" means rejection (Decision Manager / DAG rejection)
+        if (status === "201" || status === 201) {
+          const rejectionMessage = errorMessage || `Transaction rejected: ${errorReason || "Unknown reason"}`;
+          console.error(`[UNIFIED_CHECKOUT] ❌ Payment rejected by Decision Manager: ${rejectionMessage}`);
+          
+          // Create error object that matches CyberSource API error format
+          // Use 400 (Bad Request) as HTTP status since 201 is not a standard error code
+          const error = new Error(rejectionMessage);
+          error.error = errorReason || "DAGGREJECTED";
+          error.response = {
+            status: 400, // Use 400 Bad Request for rejection
+            text: JSON.stringify({
+              status: "201", // Keep CyberSource status in response body
+              message: rejectionMessage,
+              errorInformation: {
+                reason: errorReason || "DAGGREJECTED",
+              },
+            }),
+          };
+          throw error;
+        }
+
+        // Status "200" means success (payment already processed by complete())
+        if (status === "200" || status === 200) {
+          console.log(`[UNIFIED_CHECKOUT] ✅ Payment already processed by complete() - status: ${status}`);
+          // Continue with charge request to get transaction details
+        }
+
+        // Extract 3DS authentication fields from completeResponse
+        // These fields can be in multiple locations:
+        // 1. payload.details.consumerAuthenticationInformation (most common)
+        // 2. payload.consumerAuthenticationInformation (top level)
+        // 3. payload.details (direct fields)
+        const authInfo = payload.details?.consumerAuthenticationInformation || 
+                        payload.consumerAuthenticationInformation || 
+                        payload.details ||
+                        {};
+
+        // E-commerce Indicator (ECI) - per developer guide page 163, Visa should have ECI of 11, etc.
+        // Can be: ecommerceIndicator, indicator, eci, eciRaw
+        authEcommerceIndicator = authInfo.ecommerceIndicator || 
+                                 authInfo.indicator || 
+                                 authInfo.eci ||
+                                 authInfo.eciRaw ||
+                                 null;
+
+        // CAVV (Cardholder Authentication Verification Value)
+        // Required for Visa, American Express, JCB, Diners Club, Discover, China UnionPay, Elo
+        authCavv = authInfo.cavv || null;
+
+        // UCAF Collection Indicator (UCSF) - for Mastercard only
+        // Also known as ucafCollectionIndicator
+        authUcafCollectionIndicator = authInfo.ucafCollectionIndicator || 
+                                     authInfo.UCSF || 
+                                     null;
+
+        // XID - Transaction identifier (may not be present for all card types)
+        authXid = authInfo.xid || null;
+
+        // 3-D Secure specification version
+        authSpecificationVersion = authInfo.specificationVersion || 
+                                  authInfo.paSpecificationVersion || 
+                                  null;
+
+        // Directory server transaction ID (not required for 3-D Secure 1.0)
+        authDirectoryServerTransactionId = authInfo.directoryServerTransactionId || null;
+
+        // Also check for ucafAuthenticationData (AAV for Mastercard)
+        authUcafAuthenticationData = authInfo.ucafAuthenticationData || null;
+
+        console.log(`[UNIFIED_CHECKOUT] 🔐 Extracted 3DS authentication fields from completeResponse:`);
+        console.log(`[UNIFIED_CHECKOUT]   - ecommerceIndicator (ECI): ${authEcommerceIndicator || "Not present"}`);
+        console.log(`[UNIFIED_CHECKOUT]   - cavv: ${authCavv ? "Present (" + authCavv.substring(0, 10) + "...)" : "Not present"}`);
+        console.log(`[UNIFIED_CHECKOUT]   - ucafCollectionIndicator (UCSF): ${authUcafCollectionIndicator || "Not present"}`);
+        console.log(`[UNIFIED_CHECKOUT]   - ucafAuthenticationData (AAV): ${authUcafAuthenticationData ? "Present (" + authUcafAuthenticationData.substring(0, 10) + "...)" : "Not present"}`);
+        console.log(`[UNIFIED_CHECKOUT]   - xid: ${authXid || "Not present"}`);
+        console.log(`[UNIFIED_CHECKOUT]   - specificationVersion: ${authSpecificationVersion || "Not present"}`);
+        console.log(`[UNIFIED_CHECKOUT]   - directoryServerTransactionId: ${authDirectoryServerTransactionId || "Not present"}`);
+      }
+    } catch (decodeError) {
+      console.warn(
+        `[UNIFIED_CHECKOUT] ⚠️ Could not decode completeResponse JWT: ${decodeError.message}`
+      );
+      // Continue with charge request if we can't decode
+    }
+  }
+
   // #region agent log
   // Instrumentation: Decode transient token to check if it contains card details
   if (transientToken && transientToken.includes(".")) {
@@ -2258,10 +2378,12 @@ async function chargeUnifiedCheckoutToken({
     // This matches the REST guide example and avoids SYSTEM_ERROR 120 for this merchant.
 
     // processingInformation: required commerceIndicator for transient token auth
+    // Note: commerceIndicator (internet/moto/etc.) is different from ecommerceIndicator (ECI value like 05, 06, 07, 11)
+    // The ecommerceIndicator (ECI) comes from 3DS authentication and goes in consumerAuthenticationInformation
     const processingInformation =
       new cybersourceRestApi.Ptsv2paymentsProcessingInformation();
     processingInformation.capture = true;
-    processingInformation.commerceIndicator = "internet";
+    processingInformation.commerceIndicator = "internet"; // Transaction type: internet (e-commerce)
     requestObj.processingInformation = processingInformation;
 
     const orderInformation =
@@ -2403,12 +2525,16 @@ async function chargeUnifiedCheckoutToken({
   }
 
   // Include 3D Secure authentication data if provided (required after 3DS validation)
-  if (authenticationTransactionId || authenticationResult) {
+  // Include if we have authenticationTransactionId, authenticationResult, or any extracted 3DS fields
+  if (authenticationTransactionId || authenticationResult || 
+      authEcommerceIndicator || authCavv || authUcafCollectionIndicator || 
+      authUcafAuthenticationData || authXid) {
     console.log(
       "[UNIFIED_CHECKOUT] 🔐 Including 3D Secure authentication data"
     );
     const consumerAuthenticationInformation =
       new cybersourceRestApi.Ptsv2paymentsConsumerAuthenticationInformation();
+    
     if (authenticationTransactionId) {
       consumerAuthenticationInformation.authenticationTransactionId =
         authenticationTransactionId;
@@ -2416,6 +2542,7 @@ async function chargeUnifiedCheckoutToken({
         `[UNIFIED_CHECKOUT]   - Authentication Transaction ID: ${authenticationTransactionId}`
       );
     }
+    
     if (authenticationResult) {
       consumerAuthenticationInformation.authenticationResult =
         authenticationResult; // 'Y' = authenticated, 'N' = not authenticated, 'U' = unavailable
@@ -2423,6 +2550,57 @@ async function chargeUnifiedCheckoutToken({
         `[UNIFIED_CHECKOUT]   - Authentication Result: ${authenticationResult} (Y=authenticated, N=not authenticated, U=unavailable)`
       );
     }
+
+    // Include 3DS authentication fields from completeResponse (per developer guide page 163)
+    if (authEcommerceIndicator) {
+      consumerAuthenticationInformation.ecommerceIndicator = authEcommerceIndicator;
+      console.log(
+        `[UNIFIED_CHECKOUT]   - E-commerce Indicator (ECI): ${authEcommerceIndicator}`
+      );
+    }
+
+    if (authCavv) {
+      consumerAuthenticationInformation.cavv = authCavv;
+      console.log(
+        `[UNIFIED_CHECKOUT]   - CAVV: Present (${authCavv.length} chars)`
+      );
+    }
+
+    if (authUcafCollectionIndicator) {
+      consumerAuthenticationInformation.ucafCollectionIndicator = authUcafCollectionIndicator;
+      console.log(
+        `[UNIFIED_CHECKOUT]   - UCAF Collection Indicator (UCSF): ${authUcafCollectionIndicator}`
+      );
+    }
+
+    if (authUcafAuthenticationData) {
+      consumerAuthenticationInformation.ucafAuthenticationData = authUcafAuthenticationData;
+      console.log(
+        `[UNIFIED_CHECKOUT]   - UCAF Authentication Data (AAV): Present (${authUcafAuthenticationData.length} chars)`
+      );
+    }
+
+    if (authXid) {
+      consumerAuthenticationInformation.xid = authXid;
+      console.log(
+        `[UNIFIED_CHECKOUT]   - XID: ${authXid}`
+      );
+    }
+
+    if (authSpecificationVersion) {
+      consumerAuthenticationInformation.specificationVersion = authSpecificationVersion;
+      console.log(
+        `[UNIFIED_CHECKOUT]   - Specification Version: ${authSpecificationVersion}`
+      );
+    }
+
+    if (authDirectoryServerTransactionId) {
+      consumerAuthenticationInformation.directoryServerTransactionId = authDirectoryServerTransactionId;
+      console.log(
+        `[UNIFIED_CHECKOUT]   - Directory Server Transaction ID: ${authDirectoryServerTransactionId}`
+      );
+    }
+
     requestObj.consumerAuthenticationInformation =
       consumerAuthenticationInformation;
   } else {
