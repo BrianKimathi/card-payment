@@ -41,6 +41,9 @@ const corsOptions = {
       /^https:\/\/.*\.onrender\.com$/, // Allow all Render.com subdomains
       /^https:\/\/.*\.ngrok-free\.app$/, // Allow ngrok URLs for testing
       /^https:\/\/.*\.ngrok\.io$/, // Allow ngrok.io URLs
+      /^https:\/\/.*\.tiankainvestmentsltd\.com$/, // Allow custom domain and subdomains
+      "https://tiankainvestmentsltd.com",
+      "https://www.tiankainvestmentsltd.com",
       "http://localhost:3000",
       "http://localhost:8000",
       "http://localhost:4000",
@@ -239,8 +242,8 @@ app.post("/api/unified-checkout/capture-context", async (req, res) => {
         "true";
     }
     if (typeof requestBody.completeMandateType === "undefined") {
-      // CAPTURE: authorize+capture in one step (matches our processingInformation.capture=true)
-      requestBody.completeMandateType = "CAPTURE";
+      // PREFER_AUTH: prefer authorization over capture
+      requestBody.completeMandateType = "PREFER_AUTH";
     }
     if (typeof requestBody.enableConsumerAuthentication === "undefined") {
       requestBody.enableConsumerAuthentication = true;
@@ -1319,9 +1322,16 @@ app.use((err, _req, res, _next) => {
   res.status(500).json({ error: "Internal server error" });
 });
 
-app.listen(PORT, () => {
-  console.log(
-    `KileKitabu Backend (Node.js) running on http://localhost:${PORT}`
-  );
-  console.log(`Environment: ${process.env.NODE_ENV || "development"}`);
-});
+// Only start server if not running in Cloud Functions/Cloud Run
+// Cloud Functions/Cloud Run will handle the server automatically
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(
+      `KileKitabu Backend (Node.js) running on http://localhost:${PORT}`
+    );
+    console.log(`Environment: ${process.env.NODE_ENV || "development"}`);
+  });
+}
+
+// Export app for Cloud Functions/Cloud Run
+module.exports = app;

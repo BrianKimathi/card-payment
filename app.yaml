@@ -1,0 +1,19 @@
+# Google Cloud Functions/Cloud Run configuration
+# For Cloud Run, this file is optional but can be used with gcloud run deploy
+
+runtime: nodejs18
+
+# Environment variables (set these in Cloud Console or via gcloud)
+# env_variables:
+#   CYBERSOURCE_MERCHANT_ID: "your_merchant_id"
+#   CYBERSOURCE_MERCHANT_KEY_ID: "your_key_id"
+#   CYBERSOURCE_MERCHANT_SECRET_KEY: "your_secret_key"
+#   CYBERSOURCE_RUN_ENVIRONMENT: "api.cybersource.com"
+#   NODE_ENV: "production"
+#   FIREBASE_PROJECT_ID: "your_project_id"
+
+# Note: For security, set sensitive environment variables via:
+# 1. Google Cloud Console: Cloud Functions > Your Function > Configuration > Environment Variables
+# 2. gcloud CLI: gcloud functions deploy ... --set-env-vars KEY=VALUE
+# 3. Secret Manager (recommended for production)
+

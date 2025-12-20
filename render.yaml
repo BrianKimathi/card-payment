@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: cybersource-backend
+    env: node
+    buildCommand: npm install --production
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 5000
+    # Environment variables should be set in Render dashboard:
+    # - CYBERSOURCE_MERCHANT_ID
+    # - CYBERSOURCE_MERCHANT_KEY_ID
+    # - CYBERSOURCE_MERCHANT_SECRET_KEY
+    # - CYBERSOURCE_RUN_ENVIRONMENT (api.cybersource.com for production, apitest.cybersource.com for sandbox)
+    # - FIREBASE_PROJECT_ID (if using Firebase)
+    # - FIREBASE_PRIVATE_KEY (if using Firebase)
+    # - FIREBASE_CLIENT_EMAIL (if using Firebase)
+
+

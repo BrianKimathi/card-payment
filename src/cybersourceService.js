@@ -296,7 +296,7 @@ async function generateCaptureContext(options = {}) {
     referenceCode = null,
     // Complete Mandate options
     useCompleteMandate = false, // Set to true to enable service orchestration
-    completeMandateType = "CAPTURE", // 'CAPTURE', 'AUTH', or 'PREFER_AUTH'
+    completeMandateType = "PREFER_AUTH", // 'CAPTURE', 'AUTH', or 'PREFER_AUTH'
     enableDecisionManager = true,
     enableConsumerAuthentication = true,
     enableTmsTokenCreate = false,
