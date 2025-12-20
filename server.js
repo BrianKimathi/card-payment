@@ -241,10 +241,8 @@ app.post("/api/unified-checkout/capture-context", async (req, res) => {
         String(process.env.UC_USE_COMPLETE_MANDATE || "").toLowerCase() ===
         "true";
     }
-    if (typeof requestBody.completeMandateType === "undefined") {
-      // PREFER_AUTH: prefer authorization over capture
-      requestBody.completeMandateType = "PREFER_AUTH";
-    }
+    // Always use PREFER_AUTH, override any client value (including CAPTURE)
+    requestBody.completeMandateType = "PREFER_AUTH";
     if (typeof requestBody.enableConsumerAuthentication === "undefined") {
       requestBody.enableConsumerAuthentication = true;
     }

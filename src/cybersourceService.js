@@ -296,7 +296,7 @@ async function generateCaptureContext(options = {}) {
     referenceCode = null,
     // Complete Mandate options
     useCompleteMandate = false, // Set to true to enable service orchestration
-    completeMandateType = "PREFER_AUTH", // 'CAPTURE', 'AUTH', or 'PREFER_AUTH'
+    completeMandateType = "PREFER_AUTH", // Always use PREFER_AUTH (overrides client value if needed)
     enableDecisionManager = true,
     enableConsumerAuthentication = true,
     enableTmsTokenCreate = false,
@@ -460,7 +460,8 @@ async function generateCaptureContext(options = {}) {
     try {
       const completeMandate =
         new cybersourceRestApi.Upv1capturecontextsCompleteMandate();
-      completeMandate.type = completeMandateType; // 'CAPTURE', 'AUTH', or 'PREFER_AUTH'
+      // Always use PREFER_AUTH, override any client value (including CAPTURE)
+      completeMandate.type = "PREFER_AUTH";
       completeMandate.decisionManager = enableDecisionManager;
       completeMandate.consumerAuthentication = enableConsumerAuthentication;
 
@@ -475,7 +476,7 @@ async function generateCaptureContext(options = {}) {
 
       requestObj.completeMandate = completeMandate;
       console.log("[CAPTURE_CONTEXT] Complete Mandate enabled:", {
-        type: completeMandateType,
+        type: "PREFER_AUTH",
         decisionManager: enableDecisionManager,
         consumerAuthentication: enableConsumerAuthentication,
       });
