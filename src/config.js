@@ -31,6 +31,11 @@ const config = {
     process.env.MPESA_CALLBACK_URL ||
     `${process.env.BASE_URL || "https://kilekitabu-backend.onrender.com"}/api/mpesa/callback`,
 
+  // Paystack
+  PAYSTACK_SECRET_KEY: process.env.PAYSTACK_SECRET_KEY || "",
+  PAYSTACK_PUBLIC_KEY: process.env.PAYSTACK_PUBLIC_KEY || "",
+  PAYSTACK_WEBHOOK_SECRET: process.env.PAYSTACK_WEBHOOK_SECRET || "",
+
   // Subscription
   DAILY_RATE: parseFloat(process.env.DAILY_RATE || "5.0"),
   FREE_TRIAL_DAYS: parseInt(process.env.FREE_TRIAL_DAYS || "14"),

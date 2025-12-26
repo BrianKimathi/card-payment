@@ -44,7 +44,8 @@ function checkEnvironment() {
   } else {
     console.log("✅ CyberSource configured");
     // Print a safe fingerprint of the CyberSource config to debug 401s without leaking secrets
-    const runEnv = process.env.CYBERSOURCE_RUN_ENVIRONMENT || "apitest.cybersource.com";
+    // Hardcoded to production - no env var check
+    const runEnv = "api.cybersource.com";
     const merchantId = process.env.CYBERSOURCE_MERCHANT_ID || "";
     const keyId = process.env.CYBERSOURCE_MERCHANT_KEY_ID || "";
     const secret = process.env.CYBERSOURCE_MERCHANT_SECRET_KEY || "";

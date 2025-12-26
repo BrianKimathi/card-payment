@@ -3,23 +3,10 @@
 const express = require("express");
 const morgan = require("morgan");
 const cors = require("cors");
-const {
-  createCardPayment,
-  createCardPaymentWithAuth,
-  generateCaptureContext,
-  chargeGooglePayToken,
-  createGooglePayPaymentFromBlob,
-  checkPayerAuthEnrollment,
-  payerAuthSetup,
-  validateAuthenticationResults,
-  searchTransactionsByReference,
-  chargeUnifiedCheckoutToken,
-  checkPayerAuthEnrollmentWithToken,
-  validateAuthenticationResultsWithToken,
-} = require("./src/cybersourceService");
 const { db } = require("./src/firebaseService");
 const config = require("./src/config");
 const { requireAuth } = require("./src/authMiddleware");
+const PaystackService = require("./src/paystackService");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -106,1215 +93,740 @@ const subscriptionRoutes = require("./routes/subscription");
 const notificationRoutes = require("./routes/notifications");
 const cronRoutes = require("./routes/cron");
 
+// Initialize payment services
+const paystackService = new PaystackService(config);
+
 app.use("/api/mpesa", mpesaRoutes);
 app.use("/api", subscriptionRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/cron", cronRoutes);
 
-app.post("/api/cards/pay", async (req, res) => {
+// Paystack Card Payment Endpoint
+app.post("/api/cards/pay", requireAuth, async (req, res) => {
   const startTime = Date.now();
-  console.log("[API] POST /api/cards/pay - Card payment request received");
+  console.log("[API] POST /api/cards/pay - Paystack card payment request received");
 
   try {
     const {
       amount,
-      currency,
+      currency = "NGN", // Paystack defaults to NGN, but can handle other currencies
       card,
-      billingInfo,
+      email,
       referenceCode,
-      capture,
-      authenticationTransactionId,
-      authenticationResult,
+      metadata,
     } = req.body || {};
 
     console.log("[API] Request validation...");
     if (
       !amount ||
-      !currency ||
       !card?.number ||
+      !card?.cvv ||
       !card?.expirationMonth ||
-      !card?.expirationYear
+      !card?.expirationYear ||
+      !email
     ) {
-      console.log(
-        "[API] ❌ Validation failed: Missing required card payment fields"
-      );
-      return res
-        .status(400)
-        .json({ error: "Missing required card payment fields" });
+      console.log("[API] ❌ Validation failed: Missing required fields");
+      return res.status(400).json({
+        error: "Missing required fields: amount, card details (number, cvv, expiry), email"
+      });
     }
+
+    // Validate currency (Paystack supports NGN, USD, GHS, ZAR, KES)
+    const supportedCurrencies = ["NGN", "USD", "GHS", "ZAR", "KES"];
+    if (!supportedCurrencies.includes(currency.toUpperCase())) {
+      console.log(`[API] ❌ Unsupported currency: ${currency}`);
+      return res.status(400).json({
+        error: `Unsupported currency: ${currency}. Paystack supports: ${supportedCurrencies.join(", ")}`
+      });
+    }
+
     console.log("[API] ✅ Request validated");
     console.log(`[API] Amount: ${amount} ${currency}`);
-    console.log(
-      `[API] Capture: ${
-        capture !== false ? "YES (authorize+capture)" : "NO (authorize only)"
-      }`
-    );
-    console.log(
-      `[API] 3D Secure Auth Transaction ID: ${
-        authenticationTransactionId || "Not provided"
-      }`
-    );
-    console.log(
-      `[API] 3D Secure Auth Result: ${authenticationResult || "Not provided"}`
-    );
+    console.log(`[API] Email: ${email}`);
+    console.log(`[API] Card: ****${card.number.slice(-4)}`);
 
-    // Use authenticated payment flow if authentication data is provided
-    if (authenticationTransactionId || authenticationResult) {
-      console.log("[API] 🔐 Using 3D Secure authenticated payment flow");
-      const result = await createCardPaymentWithAuth({
-        amount,
-        currency,
-        card,
-        billingInfo,
-        referenceCode,
-        capture,
-        authenticationTransactionId,
-        authenticationResult,
+    // Generate reference if not provided
+    const reference = referenceCode || `CARD_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+    // Prepare metadata
+    const paymentMetadata = {
+      userId: req.userId,
+      paymentType: "card",
+      ...metadata,
+    };
+
+    console.log("[API] 💳 Processing card payment with Paystack...");
+
+    const result = await paystackService.chargeCard({
+      amount: parseFloat(amount),
+      currency: currency.toUpperCase(),
+      email,
+      card,
+      reference,
+      metadata: paymentMetadata,
+    });
+
+    const duration = Date.now() - startTime;
+
+    if (result.success) {
+      console.log(`[API] ✅ Card charge initiated in ${duration}ms`);
+      console.log(`[API] Reference: ${result.data.reference}`);
+      console.log(`[API] Status: ${result.data.status}`);
+
+      // Check if payment requires additional action
+      if (result.data.status === "send_pin") {
+        console.log("[API] 📌 PIN required for card verification");
+        return res.json({
+          success: true,
+          status: "pin_required",
+          reference: result.data.reference,
+          message: "Please provide your card PIN to complete the transaction",
+        });
+      }
+
+      if (result.data.status === "send_otp") {
+        console.log("[API] 📌 OTP required for card verification");
+        return res.json({
+          success: true,
+          status: "otp_required",
+          reference: result.data.reference,
+          message: "Please provide the OTP sent to your phone to complete the transaction",
+        });
+      }
+
+      if (result.data.status === "send_phone") {
+        console.log("[API] 📌 Phone number required for card verification");
+        return res.json({
+          success: true,
+          status: "phone_required",
+          reference: result.data.reference,
+          message: "Please provide your phone number to complete the transaction",
+        });
+      }
+
+      // Payment completed successfully
+      if (result.data.status === "success") {
+        console.log("[API] ✅ Payment completed successfully");
+
+        // Add credits to user account if payment was successful
+        if (req.userId && result.data.amount) {
+          try {
+            const userRef = db.ref(`registeredUser/${req.userId}`);
+            const userSnapshot = await userRef.once("value");
+            const userData = userSnapshot.val() || {};
+
+            // Calculate credit days (assuming 100 NGN = 1 day, adjust as needed)
+            const dailyRate = config.DAILY_RATE || 5; // KES per day
+            const usdToKesRate = config.USD_TO_KES_RATE || 130.0;
+
+            // Convert Paystack amount (kobo) back to base currency amount
+            const amountInBaseCurrency = result.data.amount / 100;
+            let amountInKes;
+
+            if (currency.toUpperCase() === "KES") {
+              amountInKes = amountInBaseCurrency;
+            } else if (currency.toUpperCase() === "USD") {
+              amountInKes = amountInBaseCurrency * usdToKesRate;
+            } else {
+              // For other currencies, approximate conversion (this should be improved)
+              amountInKes = amountInBaseCurrency * 0.15; // Rough approximation
+            }
+
+            const creditDays = Math.floor(amountInKes / dailyRate) || 1;
+
+            const currentCredit = parseInt(userData.credit_balance || 0);
+            const newCredit = currentCredit + creditDays;
+
+            const now = new Date().toISOString();
+            const monthKey = now.substring(0, 7);
+            const monthly = userData.monthly_paid || {};
+            const monthSpend = parseFloat(monthly[monthKey] || 0) + amountInKes;
+            monthly[monthKey] = monthSpend;
+
+            await userRef.update({
+              credit_balance: newCredit,
+              total_payments: parseFloat(userData.total_payments || 0) + amountInKes,
+              monthly_paid: monthly,
+              last_payment_date: now,
+              updated_at: now,
+            });
+
+            // Update payment record
+            await db.ref(`payments/${req.userId}/${reference}`).set({
+              status: "completed",
+              transaction_id: result.data.id,
+              reference: result.data.reference,
+              amount: amountInBaseCurrency,
+              currency: currency.toUpperCase(),
+              credit_days_added: creditDays,
+              payment_method: "paystack_card",
+              completed_at: now,
+              updated_at: now,
+            });
+
+            console.log(`[API] ✅ Credits added: user=${req.userId}, days=${creditDays}, new_balance=${newCredit}`);
+
+            return res.json({
+              success: true,
+              status: "completed",
+              reference: result.data.reference,
+              transaction_id: result.data.id,
+              credit_days_added: creditDays,
+              new_credit_balance: newCredit,
+            });
+          } catch (creditError) {
+            console.error("[API] ⚠️ Failed to add credits:", creditError.message);
+            // Still return success for the payment, but log the credit addition failure
+          }
+        }
+
+        return res.json({
+          success: true,
+          status: "completed",
+          reference: result.data.reference,
+          transaction_id: result.data.id,
+        });
+      }
+
+      // Payment is still processing
+      return res.json({
+        success: true,
+        status: result.data.status,
+        reference: result.data.reference,
+        message: "Payment is being processed",
       });
 
-      const duration = Date.now() - startTime;
-      console.log(`[API] ✅ Payment completed in ${duration}ms`);
-      console.log(`[API] Response Status: ${result.response?.status || 200}`);
-
-      res.status(result.response?.status || 200).json(result.data);
     } else {
-      console.log("[API] 💳 Using standard payment flow (no 3D Secure)");
-      const result = await createCardPayment({
-        amount,
-        currency,
-        card,
-        billingInfo,
-        referenceCode,
-        capture,
+      console.log(`[API] ❌ Card charge failed in ${duration}ms`);
+      console.log(`[API] Error: ${result.error}`);
+
+      return res.status(400).json({
+        error: result.error || "Card payment failed",
       });
-
-      const duration = Date.now() - startTime;
-      console.log(`[API] ✅ Payment completed in ${duration}ms`);
-      console.log(`[API] Response Status: ${result.response?.status || 200}`);
-
-      res.status(result.response?.status || 200).json(result.data);
     }
+
   } catch (err) {
     const duration = Date.now() - startTime;
     const status = err.response?.status || 500;
     console.log(`[API] ❌ Payment failed after ${duration}ms`);
     console.log(`[API] Error Status: ${status}`);
-    console.log(
-      `[API] Error Message: ${err.error || err.message || "Unknown error"}`
-    );
-    if (err.response?.text) {
-      console.log(
-        `[API] Error Response Body: ${err.response.text.substring(0, 500)}`
-      );
-    }
+    console.log(`[API] Error: ${err.message || "Unknown error"}`);
 
     res.status(status).json({
-      error: err.error || err.message || "Card payment failed",
-      responseBody: err.response?.text,
+      error: err.message || "Card payment failed",
+      responseBody: err.response?.data,
     });
   }
 });
 
-// Unified Checkout Capture Context (supports both CARD and GOOGLEPAY)
-app.post("/api/unified-checkout/capture-context", async (req, res) => {
-  try {
-    logJson("UNIFIED_CHECKOUT_CAPTURE_CONTEXT_REQUEST", req.body || {});
-    // Default to both PANENTRY (card) and GOOGLEPAY if not specified
-    // Note: CyberSource Unified Checkout uses "PANENTRY" for card payments, not "CARD"
-    const requestBody = req.body || {};
-
-    // Normalize targetOrigins - trim whitespace from each URL
-    if (requestBody.targetOrigins && Array.isArray(requestBody.targetOrigins)) {
-      requestBody.targetOrigins = requestBody.targetOrigins
-        .map((origin) => (typeof origin === "string" ? origin.trim() : origin))
-        .filter((origin) => origin && origin.length > 0); // Remove empty strings
-    }
-
-    if (!requestBody.allowedPaymentTypes) {
-      requestBody.allowedPaymentTypes = ["PANENTRY", "GOOGLEPAY"];
-    }
-    // Default completeMandate to OFF. In our environment it has been producing $0.00 auth/settlement
-    // and duplicate records (payer-auth validation + UC_* payment).
-    // You can explicitly enable it by passing useCompleteMandate=true from the client, or via env.
-    if (typeof requestBody.useCompleteMandate === "undefined") {
-      requestBody.useCompleteMandate =
-        String(process.env.UC_USE_COMPLETE_MANDATE || "").toLowerCase() ===
-        "true";
-    }
-    // Always use PREFER_AUTH, override any client value (including CAPTURE)
-    requestBody.completeMandateType = "PREFER_AUTH";
-    if (typeof requestBody.enableConsumerAuthentication === "undefined") {
-      requestBody.enableConsumerAuthentication = true;
-    }
-    if (typeof requestBody.enableDecisionManager === "undefined") {
-      requestBody.enableDecisionManager = true;
-    }
-
-    const captureContext = await generateCaptureContext(requestBody);
-    logJson("UNIFIED_CHECKOUT_CAPTURE_CONTEXT_RESPONSE", captureContext);
-    res.json(captureContext);
-  } catch (err) {
-    const status = err.response?.status || 500;
-    logJson("UNIFIED_CHECKOUT_CAPTURE_CONTEXT_ERROR", {
-      status,
-      message: err.error || err.message,
-      responseBody: err.response?.text,
-    });
-    res.status(status).json({
-      error: err.error || err.message || "Capture context generation failed",
-      responseBody: err.response?.text,
-    });
-  }
-});
-
-// Google Pay Capture Context (legacy - kept for backward compatibility)
-app.post("/api/googlepay/capture-context", async (req, res) => {
-  try {
-    logJson("GPAY_CAPTURE_CONTEXT_REQUEST", req.body || {});
-    // Ensure GOOGLEPAY is included
-    const requestBody = req.body || {};
-    if (!requestBody.allowedPaymentTypes) {
-      requestBody.allowedPaymentTypes = ["GOOGLEPAY"];
-    } else if (!requestBody.allowedPaymentTypes.includes("GOOGLEPAY")) {
-      requestBody.allowedPaymentTypes.push("GOOGLEPAY");
-    }
-    const captureContext = await generateCaptureContext(requestBody);
-    logJson("GPAY_CAPTURE_CONTEXT_RESPONSE", captureContext);
-    res.json(captureContext);
-  } catch (err) {
-    const status = err.response?.status || 500;
-    logJson("GPAY_CAPTURE_CONTEXT_ERROR", {
-      status,
-      message: err.error || err.message,
-      responseBody: err.response?.text,
-    });
-    res.status(status).json({
-      error: err.error || err.message || "Capture context generation failed",
-      responseBody: err.response?.text,
-    });
-  }
-});
-
-// Payer Authentication (3D Secure) Endpoints
-
-/**
- * Check if payer authentication (3D Secure) is required for a card payment.
- * Call this before processing payment to determine if 3D Secure is needed.
- */
-app.post("/api/payer-auth/enroll", async (req, res) => {
+// Paystack Transaction Initialization Endpoint
+app.post("/api/paystack/initialize", requireAuth, async (req, res) => {
   const startTime = Date.now();
-  console.log(
-    "[API] POST /api/payer-auth/enroll - Enrollment check request received"
-  );
+  console.log("[API] POST /api/paystack/initialize - Paystack transaction initialization request");
 
-  try {
-    const { amount, currency, card, billingInfo, referenceCode } =
-      req.body || {};
-
-    console.log("[API] Request validation...");
-    if (
-      !amount ||
-      !currency ||
-      !card?.number ||
-      !card?.expirationMonth ||
-      !card?.expirationYear
-    ) {
-      console.log("[API] ❌ Validation failed: Missing required fields");
-      return res.status(400).json({
-        error: "Missing required fields: amount, currency, card details",
-      });
-    }
-    console.log("[API] ✅ Request validated");
-
-    logJson("PA_ENROLL_REQUEST", {
-      amount,
-      currency,
-      cardLast4: card.number.slice(-4),
-      referenceCode,
-    });
-
-    console.log("[API] Calling checkPayerAuthEnrollment...");
-    const result = await checkPayerAuthEnrollment({
-      amount,
-      currency,
-      card,
-      billingInfo,
-      referenceCode,
-    });
-
-    const duration = Date.now() - startTime;
-    console.log(`[API] ✅ Enrollment check completed in ${duration}ms`);
-    console.log(`[API] Response Status: ${result.response?.status || 200}`);
-
-    logJson("PA_ENROLL_RESPONSE", result?.data || {});
-    res.status(result.response?.status || 200).json(result.data);
-  } catch (err) {
-    const duration = Date.now() - startTime;
-    const status = err.response?.status || 500;
-    console.log(`[API] ❌ Enrollment check failed after ${duration}ms`);
-    console.log(`[API] Error Status: ${status}`);
-    console.log(
-      `[API] Error Message: ${err.error || err.message || "Unknown error"}`
-    );
-
-    logJson("PA_ENROLL_ERROR", {
-      status,
-      message: err.error || err.message,
-      responseBody: err.response?.text,
-    });
-    res.status(status).json({
-      error: err.error || err.message || "Payer auth enrollment check failed",
-      responseBody: err.response?.text,
+  if (!paystackService) {
+    return res.status(500).json({ 
+      success: false,
+      error: "Paystack service not configured" 
     });
   }
-});
-
-/**
- * Setup payer authentication (optional, for setup flows).
- * Used when you want to set up authentication without processing a payment.
- */
-app.post("/api/payer-auth/setup", async (req, res) => {
-  const startTime = Date.now();
-  console.log(
-    "[API] POST /api/payer-auth/setup - Payer authentication setup request received"
-  );
-
-  try {
-    const { card, transientToken, referenceCode, billingInfo } = req.body || {};
-
-    console.log("[API] Request validation...");
-    if (!card && !transientToken) {
-      console.log("[API] ❌ Validation failed: Either card or transientToken is required");
-      return res.status(400).json({
-        error: "Either card or transientToken is required",
-      });
-    }
-    console.log("[API] ✅ Request validated");
-
-    logJson("PA_SETUP_REQUEST", {
-      hasCard: !!card,
-      hasTransientToken: !!transientToken,
-      referenceCode,
-      cardLast4: card?.number ? card.number.slice(-4) : "N/A",
-      transientTokenLength: transientToken?.length || 0,
-    });
-
-    console.log("[API] Calling payerAuthSetup...");
-    console.log(`[API]   - Has card: ${!!card}`);
-    console.log(`[API]   - Has transient token: ${!!transientToken}`);
-    console.log(`[API]   - Reference code: ${referenceCode || "N/A"}`);
-
-    const result = await payerAuthSetup({
-      card,
-      transientToken,
-      referenceCode,
-      billingInfo,
-    });
-
-    const duration = Date.now() - startTime;
-    console.log(`[API] ✅ Setup completed in ${duration}ms`);
-    console.log(`[API] Response Status: ${result.response?.status || 200}`);
-    
-    if (result?.data?.status) {
-      console.log(`[API]   - Status: ${result.data.status}`);
-    }
-    if (result?.data?.consumerAuthenticationInformation?.authenticationTransactionId) {
-      console.log(`[API]   - Auth Transaction ID: ${result.data.consumerAuthenticationInformation.authenticationTransactionId}`);
-    }
-
-    logJson("PA_SETUP_RESPONSE", result?.data || {});
-    res.status(result.response?.status || 200).json(result.data);
-  } catch (err) {
-    const duration = Date.now() - startTime;
-    const status = err.response?.status || 500;
-    console.log(`[API] ❌ Setup failed after ${duration}ms`);
-    console.log(`[API] Error Status: ${status}`);
-    console.log(
-      `[API] Error Message: ${err.error || err.message || "Unknown error"}`
-    );
-
-    logJson("PA_SETUP_ERROR", {
-      status,
-      message: err.error || err.message,
-      responseBody: err.response?.text,
-    });
-    res.status(status).json({
-      error: err.error || err.message || "Payer auth setup failed",
-      responseBody: err.response?.text,
-    });
-  }
-});
-
-/**
- * Validate authentication results after 3D Secure challenge completion.
- * Call this after the user completes the 3D Secure challenge.
- */
-app.post("/api/payer-auth/validate", async (req, res) => {
-  const startTime = Date.now();
-  console.log(
-    "[API] POST /api/payer-auth/validate - Authentication validation request received"
-  );
 
   try {
     const {
-      authenticationTransactionId,
       amount,
-      currency,
-      card,
-      billingInfo,
-      referenceCode,
+      email,
+      currency = "USD",
+      reference,
+      metadata,
     } = req.body || {};
 
     console.log("[API] Request validation...");
-    if (!authenticationTransactionId) {
-      console.log("[API] ❌ Validation failed: authenticationTransactionId is required");
-      return res.status(400).json({
-        error: "authenticationTransactionId is required",
-      });
-    }
-
-    if (
-      !amount ||
-      !currency ||
-      !card?.number ||
-      !card?.expirationMonth ||
-      !card?.expirationYear
-    ) {
+    if (!amount || !email) {
       console.log("[API] ❌ Validation failed: Missing required fields");
       return res.status(400).json({
-        error: "Missing required fields: amount, currency, card details",
+        success: false,
+        error: "Missing required fields: amount, email"
       });
     }
+
+    // Validate currency
+    const supportedCurrencies = ["NGN", "USD", "GHS", "ZAR", "KES"];
+    if (!supportedCurrencies.includes(currency.toUpperCase())) {
+      return res.status(400).json({
+        success: false,
+        error: `Unsupported currency: ${currency}. Paystack supports: ${supportedCurrencies.join(", ")}`
+      });
+    }
+
     console.log("[API] ✅ Request validated");
+    console.log(`[API] Amount: ${amount} ${currency}`);
+    console.log(`[API] Email: ${email}`);
 
-    logJson("PA_VALIDATE_REQUEST", {
-      authenticationTransactionId,
-      amount,
-      currency,
-      cardLast4: card.number.slice(-4),
-      referenceCode,
-    });
+    // Generate reference if not provided
+    const transactionReference = reference || `PAYSTACK_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
-    console.log("[API] Calling validateAuthenticationResults...");
-    console.log(`[API]   - Auth Transaction ID: ${authenticationTransactionId}`);
-    console.log(`[API]   - Amount: ${amount} ${currency}`);
-    console.log(`[API]   - Card: ****${card.number.slice(-4)}`);
-    console.log(`[API]   - Reference code: ${referenceCode || "N/A"}`);
+    // Prepare metadata
+    const paymentMetadata = {
+      userId: req.userId,
+      paymentType: "paystack_card",
+      ...metadata,
+    };
 
-    const result = await validateAuthenticationResults({
-      authenticationTransactionId,
-      amount,
-      currency,
-      card,
-      billingInfo,
-      referenceCode,
-    });
+    console.log("[API] 💳 Initializing Paystack transaction...");
 
-    const duration = Date.now() - startTime;
-    console.log(`[API] ✅ Validation completed in ${duration}ms`);
-    console.log(`[API] Response Status: ${result.response?.status || 200}`);
-    
-    if (result?.data?.status) {
-      console.log(`[API]   - Status: ${result.data.status}`);
-    }
-    if (result?.data?.consumerAuthenticationInformation?.authenticationResult) {
-      const authResult = result.data.consumerAuthenticationInformation.authenticationResult;
-      console.log(`[API]   - Authentication Result: ${authResult} (Y=authenticated, N=not authenticated, U=unavailable)`);
-    }
-    if (result?.data?.consumerAuthenticationInformation?.ecommerceIndicator) {
-      console.log(`[API]   - ECI: ${result.data.consumerAuthenticationInformation.ecommerceIndicator}`);
-    }
-
-    logJson("PA_VALIDATE_RESPONSE", result?.data || {});
-    res.status(result.response?.status || 200).json(result.data);
-  } catch (err) {
-    const duration = Date.now() - startTime;
-    const status = err.response?.status || 500;
-    console.log(`[API] ❌ Validation failed after ${duration}ms`);
-    console.log(`[API] Error Status: ${status}`);
-    console.log(
-      `[API] Error Message: ${err.error || err.message || "Unknown error"}`
-    );
-
-    logJson("PA_VALIDATE_ERROR", {
-      status,
-      message: err.error || err.message,
-      responseBody: err.response?.text,
-    });
-    res.status(status).json({
-      error: err.error || err.message || "Authentication validation failed",
-      responseBody: err.response?.text,
-    });
-  }
-});
-
-/**
- * Unified Checkout Payer Authentication (3DS) with transient token (JTI)
- * This matches the Java sample Risk API 3DS flow but uses the UC token.
- */
-app.post("/api/unified-checkout/payer-auth/enroll", async (req, res) => {
-  const startTime = Date.now();
-  console.log(
-    "[API] POST /api/unified-checkout/payer-auth/enroll - Unified Checkout enrollment check request received"
-  );
-
-  try {
-    const { transientToken, amount, currency, billingInfo, referenceCode } =
-      req.body || {};
-
-    console.log("[API] Request validation...");
-    if (!transientToken || !amount || !currency) {
-      console.log("[API] ❌ Validation failed: Missing required fields");
-      return res.status(400).json({
-        error: "transientToken, amount, and currency are required",
-      });
-    }
-    console.log("[API] ✅ Request validated");
-
-    logJson("UC_PA_ENROLL_REQUEST", {
-      amount,
-      currency,
-      referenceCode,
-      hasBillingInfo: !!billingInfo,
-      transientTokenLength: transientToken.length,
-    });
-
-    console.log("[API] Calling checkPayerAuthEnrollmentWithToken...");
-    console.log(`[API]   - Amount: ${amount} ${currency}`);
-    console.log(`[API]   - Transient token length: ${transientToken.length}`);
-    console.log(`[API]   - Reference code: ${referenceCode || "N/A"}`);
-    console.log(`[API]   - Has billing info: ${!!billingInfo}`);
-
-    const result = await checkPayerAuthEnrollmentWithToken({
-      transientTokenJwt: transientToken,
-      amount,
-      currency,
-      billingInfo,
-      referenceCode,
+    const result = await paystackService.initializeTransaction({
+      amount: parseFloat(amount),
+      email,
+      currency: currency.toUpperCase(),
+      reference: transactionReference,
+      metadata: paymentMetadata,
     });
 
     const duration = Date.now() - startTime;
-    console.log(`[API] ✅ Unified Checkout enrollment check completed in ${duration}ms`);
-    console.log(`[API] Response Status: ${result.response?.status || 200}`);
-    
-    if (result?.data?.status) {
-      console.log(`[API]   - Status: ${result.data.status}`);
-    }
-    if (result?.data?.consumerAuthenticationInformation?.veresEnrolled) {
-      console.log(`[API]   - Veres Enrolled: ${result.data.consumerAuthenticationInformation.veresEnrolled}`);
-    }
-    if (result?.data?.consumerAuthenticationInformation?.authenticationTransactionId) {
-      console.log(`[API]   - Auth Transaction ID: ${result.data.consumerAuthenticationInformation.authenticationTransactionId}`);
-    }
 
-    logJson("UC_PA_ENROLL_RESPONSE", result?.data || {});
-    res.status(result.response?.status || 200).json(result.data);
-  } catch (err) {
-    const duration = Date.now() - startTime;
-    const status = err.response?.status || 500;
-    console.log(`[API] ❌ Unified Checkout enrollment check failed after ${duration}ms`);
-    console.log(`[API] Error Status: ${status}`);
-    console.log(
-      `[API] Error Message: ${err.error || err.message || "Unknown error"}`
-    );
-
-    logJson("UC_PA_ENROLL_ERROR", {
-      status,
-      message: err.error || err.message,
-      responseBody: err.response?.text,
-    });
-    res.status(status).json({
-      error:
-        err.error ||
-        err.message ||
-        "Unified Checkout payer-auth enrollment check failed",
-      responseBody: err.response?.text,
-    });
-  }
-});
-
-app.post("/api/unified-checkout/payer-auth/validate", async (req, res) => {
-  const startTime = Date.now();
-  console.log(
-    "[API] POST /api/unified-checkout/payer-auth/validate - Unified Checkout validation request received"
-  );
-
-  try {
-    const { transientToken, authenticationTransactionId } = req.body || {};
-
-    console.log("[API] Request validation...");
-    if (!transientToken || !authenticationTransactionId) {
-      console.log("[API] ❌ Validation failed: Missing required fields");
-      return res.status(400).json({
-        error: "transientToken and authenticationTransactionId are required",
-      });
-    }
-    console.log("[API] ✅ Request validated");
-
-    logJson("UC_PA_VALIDATE_REQUEST", {
-      authenticationTransactionId,
-      transientTokenLength: transientToken.length,
-    });
-
-    console.log("[API] Calling validateAuthenticationResultsWithToken...");
-    console.log(`[API]   - Auth Transaction ID: ${authenticationTransactionId}`);
-    console.log(`[API]   - Transient token length: ${transientToken.length}`);
-
-    const result = await validateAuthenticationResultsWithToken({
-      transientTokenJwt: transientToken,
-      authenticationTransactionId,
-    });
-
-    const duration = Date.now() - startTime;
-    console.log(`[API] ✅ Unified Checkout validation completed in ${duration}ms`);
-    console.log(`[API] Response Status: ${result.response?.status || 200}`);
-    
-    if (result?.data?.status) {
-      console.log(`[API]   - Status: ${result.data.status}`);
-    }
-    if (result?.data?.consumerAuthenticationInformation?.authenticationResult) {
-      const authResult = result.data.consumerAuthenticationInformation.authenticationResult;
-      console.log(`[API]   - Authentication Result: ${authResult} (Y=authenticated, N=not authenticated, U=unavailable)`);
-    }
-    if (result?.data?.consumerAuthenticationInformation?.ecommerceIndicator) {
-      console.log(`[API]   - ECI: ${result.data.consumerAuthenticationInformation.ecommerceIndicator}`);
-    }
-
-    logJson("UC_PA_VALIDATE_RESPONSE", result?.data || {});
-    res.status(result.response?.status || 200).json(result.data);
-  } catch (err) {
-    const duration = Date.now() - startTime;
-    const status = err.response?.status || 500;
-    console.log(`[API] ❌ Unified Checkout validation failed after ${duration}ms`);
-    console.log(`[API] Error Status: ${status}`);
-    console.log(
-      `[API] Error Message: ${err.error || err.message || "Unknown error"}`
-    );
-
-    logJson("UC_PA_VALIDATE_ERROR", {
-      status,
-      message: err.error || err.message,
-      responseBody: err.response?.text,
-    });
-    res.status(status).json({
-      error:
-        err.error ||
-        err.message ||
-        "Unified Checkout authentication validation failed",
-      responseBody: err.response?.text,
-    });
-  }
-});
-
-/**
- * Validate 3D Secure authentication and complete payment in one call.
- * This endpoint validates authentication results and then processes payment.
- * Used after user completes 3D Secure challenge.
- */
-app.post("/api/payer-auth/validate-and-complete", async (req, res) => {
-  const startTime = Date.now();
-  console.log(
-    "[API] POST /api/payer-auth/validate-and-complete - Validate and complete payment request received"
-  );
-
-  try {
-    const {
-      authenticationTransactionId,
-      amount,
-      currency,
-      card,
-      billingInfo,
-      referenceCode,
-      capture = true,
-    } = req.body || {};
-
-    console.log("[API] Request validation...");
-    if (!authenticationTransactionId) {
-      console.log("[API] ❌ Validation failed: authenticationTransactionId is required");
-      return res.status(400).json({
-        error: "authenticationTransactionId is required",
-      });
-    }
-
-    if (
-      !amount ||
-      !currency ||
-      !card?.number ||
-      !card?.expirationMonth ||
-      !card?.expirationYear
-    ) {
-      console.log("[API] ❌ Validation failed: Missing required fields");
-      return res.status(400).json({
-        error: "Missing required fields: amount, currency, card details",
-      });
-    }
-    console.log("[API] ✅ Request validated");
-
-    logJson("PA_VALIDATE_COMPLETE_REQUEST", {
-      authenticationTransactionId,
-      amount,
-      currency,
-      cardLast4: card.number.slice(-4),
-      referenceCode,
-      capture,
-    });
-
-    // Step 1: Validate authentication results
-    console.log("[API] 🔍 Step 1: Validating authentication results...");
-    console.log(`[API]   - Auth Transaction ID: ${authenticationTransactionId}`);
-    console.log(`[API]   - Amount: ${amount} ${currency}`);
-    console.log(`[API]   - Card: ****${card.number.slice(-4)}`);
-
-    let validationResult;
-    try {
-      validationResult = await validateAuthenticationResults({
-        authenticationTransactionId,
-        amount,
-        currency,
-        card,
-        billingInfo,
-        referenceCode,
-      });
-
-      const validationStatus = validationResult?.data?.status?.toUpperCase();
-      const authResult = validationResult?.data?.consumerAuthenticationInformation?.authenticationResult?.toUpperCase();
-      
-      console.log(`[API] ✅ Authentication validation completed`);
-      console.log(`[API]   - Validation Status: ${validationStatus}`);
-      console.log(`[API]   - Authentication Result: ${authResult} (Y=authenticated, N=not authenticated, U=unavailable)`);
-
-      if (validationStatus !== 'AUTHENTICATION_SUCCESSFUL' || authResult !== 'Y') {
-        console.log(`[API] ❌ Authentication validation failed or not authenticated`);
-        return res.status(400).json({
-          error: "3D Secure authentication failed or was not completed",
-          validation_status: validationStatus,
-          authentication_result: authResult,
-        });
-      }
-
-      console.log(`[API] ✅ Authentication validated successfully`);
-    } catch (validateErr) {
-      console.log(`[API] ❌ Authentication validation failed: ${validateErr.message}`);
-      return res.status(validateErr.response?.status || 400).json({
-        error: `Authentication validation failed: ${validateErr.message || validateErr.error}`,
-        responseBody: validateErr.response?.text,
-      });
-    }
-
-    // Step 2: Process payment with validated authentication
-    console.log("[API] 🚀 Step 2: Processing payment with validated authentication...");
-    
-    const authResult = validationResult?.data?.consumerAuthenticationInformation?.authenticationResult || 'Y';
-    
-    const paymentResult = await createCardPaymentWithAuth({
-      amount,
-      currency,
-      card,
-      billingInfo,
-      referenceCode,
-      capture,
-      authenticationTransactionId,
-      authenticationResult: authResult,
-    });
-
-    const duration = Date.now() - startTime;
-    console.log(`[API] ✅ Validate and complete finished in ${duration}ms`);
-    console.log(`[API] Response Status: ${paymentResult.response?.status || 200}`);
-    
-    if (paymentResult?.data?.id) {
-      console.log(`[API]   - Transaction ID: ${paymentResult.data.id}`);
-    }
-    if (paymentResult?.data?.status) {
-      console.log(`[API]   - Payment Status: ${paymentResult.data.status}`);
-    }
-
-    logJson("PA_VALIDATE_COMPLETE_RESPONSE", paymentResult?.data || {});
-    res.status(paymentResult.response?.status || 200).json(paymentResult.data);
-  } catch (err) {
-    const duration = Date.now() - startTime;
-    const status = err.response?.status || 500;
-    console.log(`[API] ❌ Validate and complete failed after ${duration}ms`);
-    console.log(`[API] Error Status: ${status}`);
-    console.log(
-      `[API] Error Message: ${err.error || err.message || "Unknown error"}`
-    );
-
-    logJson("PA_VALIDATE_COMPLETE_ERROR", {
-      status,
-      message: err.error || err.message,
-      responseBody: err.response?.text,
-    });
-    res.status(status).json({
-      error: err.error || err.message || "Validate and complete payment failed",
-      responseBody: err.response?.text,
-    });
-  }
-});
-
-// Unified Checkout Charge (supports both CARD and GOOGLEPAY from Unified Checkout)
-app.post("/api/unified-checkout/charge", requireAuth, async (req, res) => {
-  try {
-    const {
-      transientToken,
-      amount,
-      currency,
-      referenceCode,
-      billingInfo,
-      paymentType = "CARD", // 'CARD' or 'GOOGLEPAY'
-      authenticationTransactionId, // Optional: 3DS authentication transaction ID
-      authenticationResult, // Optional: 3DS authentication result ('Y', 'N', 'U')
-      completeResponse, // Optional: complete() response to check if payment was already processed
-    } = req.body || {};
-    logJson("UNIFIED_CHECKOUT_CHARGE_REQUEST", {
-      transientToken,
-      amount,
-      currency,
-      referenceCode,
-      paymentType,
-      billingInfo,
-      authenticationTransactionId:
-        authenticationTransactionId || "Not provided",
-      authenticationResult: authenticationResult || "Not provided",
-      hasCompleteResponse: !!completeResponse,
-    });
-    if (!amount || !currency || !transientToken) {
-      logJson("UNIFIED_CHECKOUT_CHARGE_ERROR", {
-        status: 400,
-        error: "Missing required fields: transientToken, amount, currency",
-      });
-      return res.status(400).json({
-        error: "transientToken, amount, and currency are required",
-      });
-    }
-
-    const result = await chargeUnifiedCheckoutToken({
-      transientToken,
-      amount,
-      currency,
-      referenceCode,
-      billingInfo,
-      paymentType,
-      authenticationTransactionId,
-      authenticationResult,
-      completeResponse,
-    });
-
-    logJson("UNIFIED_CHECKOUT_CHARGE_RESPONSE", result?.data || {});
-
-    // Add credits to user account if payment was successful
-    const status = result?.data?.status;
-    const transactionId = result?.data?.id;
-    const userId = req.userId; // Set by requireAuth middleware
-
-    if (
-      (status === "AUTHORIZED" || status === "CAPTURED") &&
-      userId &&
-      transactionId
-    ) {
-      try {
-        console.log(
-          `[UNIFIED_CHECKOUT_CHARGE] ✅ Payment successful, adding credits for user: ${userId}`
-        );
-
-        // Get user ID from auth token
-        const userRef = db.ref(`registeredUser/${userId}`);
-        const userSnapshot = await userRef.once("value");
-        const userData = userSnapshot.val() || {};
-
-        // Calculate credit days
-        const dailyRate = config.DAILY_RATE || 5; // Default to 5 KES/day if not configured
-        const amountNum = parseFloat(amount) || 0;
-
-        // Convert USD to KES if needed
-        const usdToKesRate = config.USD_TO_KES_RATE || 130.0;
-        const amountInKes =
-          currency === "USD" ? amountNum * usdToKesRate : amountNum;
-        const creditDays = Math.floor(amountInKes / dailyRate) || 1; // At least 1 day
-
-        const currentCredit = parseInt(userData.credit_balance || 0);
-        const newCredit = currentCredit + creditDays;
-
-        const now = new Date().toISOString();
-        const monthKey = now.substring(0, 7);
-        const monthly = userData.monthly_paid || {};
-        const monthSpend = parseFloat(monthly[monthKey] || 0) + amountInKes;
-        monthly[monthKey] = monthSpend;
-
-        await userRef.update({
-          credit_balance: newCredit,
-          total_payments:
-            parseFloat(userData.total_payments || 0) + amountInKes,
-          monthly_paid: monthly,
-          last_payment_date: now,
-          updated_at: now,
-        });
-
-        // Update payment record
-        const paymentId = referenceCode || `UC_${Date.now()}`;
-        await db.ref(`payments/${userId}/${paymentId}`).update({
-          status: "completed",
-          transaction_id: transactionId,
-          credit_days_added: creditDays,
-          completed_at: now,
-          updated_at: now,
-        });
-
-        console.log(
-          `[UNIFIED_CHECKOUT_CHARGE] ✅ Credits added: user_id=${userId}, amount=${amountInKes} KES, credit_days=${creditDays}, new_credit=${newCredit}`
-        );
-
-        // Add credit_days to response
-        if (result.data) {
-          result.data.credit_days = creditDays;
-        }
-      } catch (creditError) {
-        console.error(
-          `[UNIFIED_CHECKOUT_CHARGE] ⚠️ Failed to add credits: ${creditError.message}`
-        );
-        // Don't fail the request if credit addition fails - payment was successful
-      }
-    }
-
-    res.status(result.response?.status || 200).json(result.data);
-  } catch (err) {
-    const status = err.response?.status || 500;
-    logJson("UNIFIED_CHECKOUT_CHARGE_ERROR", {
-      status,
-      message: err.error || err.message,
-      responseBody: err.response?.text,
-    });
-    res.status(status).json({
-      error: err.error || err.message || "Unified Checkout charge failed",
-      responseBody: err.response?.text,
-    });
-  }
-});
-
-// Add credits endpoint for payments already processed by complete()
-app.post("/api/unified-checkout/add-credits", requireAuth, async (req, res) => {
-  try {
-    const {
-      amount,
-      currency,
-      transactionId,
-      referenceCode,
-      completeResponse, // The complete() response JWT
-    } = req.body || {};
-
-    logJson("UNIFIED_CHECKOUT_ADD_CREDITS_REQUEST", {
-      amount,
-      currency,
-      transactionId,
-      referenceCode,
-      hasCompleteResponse: !!completeResponse,
-    });
-
-    if (!amount || !currency || !transactionId) {
-      return res.status(400).json({
-        error: "amount, currency, and transactionId are required",
-      });
-    }
-
-    const userId = req.userId; // Set by requireAuth middleware
-
-    try {
-      console.log(
-        `[UNIFIED_CHECKOUT_ADD_CREDITS] ✅ Adding credits for payment already processed by complete() - user: ${userId}, transactionId: ${transactionId}`
-      );
-
-      const userRef = db.ref(`registeredUser/${userId}`);
-      const userSnapshot = await userRef.once("value");
-      const userData = userSnapshot.val() || {};
-
-      // Calculate credit days
-      const dailyRate = config.DAILY_RATE || 5;
-      const amountNum = parseFloat(amount) || 0;
-      const usdToKesRate = config.USD_TO_KES_RATE || 130.0;
-      const amountInKes =
-        currency === "USD" ? amountNum * usdToKesRate : amountNum;
-      const creditDays = Math.floor(amountInKes / dailyRate) || 1;
-
-      const currentCredit = parseInt(userData.credit_balance || 0);
-      const newCredit = currentCredit + creditDays;
-
-      const now = new Date().toISOString();
-      const monthKey = now.substring(0, 7);
-      const monthly = userData.monthly_paid || {};
-      const monthSpend = parseFloat(monthly[monthKey] || 0) + amountInKes;
-      monthly[monthKey] = monthSpend;
-
-      await userRef.update({
-        credit_balance: newCredit,
-        total_payments: parseFloat(userData.total_payments || 0) + amountInKes,
-        monthly_paid: monthly,
-        last_payment_date: now,
-        updated_at: now,
-      });
-
-      // Update payment record
-      const paymentId = referenceCode || `UC_${Date.now()}`;
-      await db.ref(`payments/${userId}/${paymentId}`).update({
-        status: "completed",
-        transaction_id: transactionId,
-        credit_days_added: creditDays,
-        completed_at: now,
-        updated_at: now,
-        payment_method: "unified_checkout_complete",
-      });
-
-      console.log(
-        `[UNIFIED_CHECKOUT_ADD_CREDITS] ✅ Credits added: user_id=${userId}, amount=${amountInKes} KES, credit_days=${creditDays}, new_credit=${newCredit}`
-      );
+    if (result.success && result.data) {
+      console.log(`[API] ✅ Transaction initialized in ${duration}ms`);
+      console.log(`[API] Access Code: ${result.data.access_code}`);
+      console.log(`[API] Reference: ${result.data.reference}`);
 
       res.status(200).json({
         success: true,
-        credit_days: creditDays,
-        new_credit_balance: newCredit,
-        transaction_id: transactionId,
-      });
-    } catch (creditError) {
-      console.error(
-        `[UNIFIED_CHECKOUT_ADD_CREDITS] ⚠️ Failed to add credits: ${creditError.message}`
-      );
-      res.status(500).json({
-        error: "Failed to add credits",
-        message: creditError.message,
-      });
-    }
-  } catch (err) {
-    const status = err.response?.status || 500;
-    logJson("UNIFIED_CHECKOUT_ADD_CREDITS_ERROR", {
-      status,
-      message: err.error || err.message,
-    });
-    res.status(status).json({
-      error: err.error || err.message || "Failed to add credits",
-    });
-  }
-});
-
-app.post("/api/googlepay/charge", requireAuth, async (req, res) => {
-  try {
-    const {
-      transientToken,
-      googlePayBlob,
-      amount,
-      currency,
-      referenceCode,
-      billingInfo,
-    } = req.body || {};
-    logJson("GPAY_CHARGE_REQUEST", {
-      transientToken,
-      googlePayBlobLen: googlePayBlob ? String(googlePayBlob).length : 0,
-      amount,
-      currency,
-      referenceCode,
-      billingInfo,
-    });
-    if (!amount || !currency || (!transientToken && !googlePayBlob)) {
-      logJson("GPAY_CHARGE_ERROR", {
-        status: 400,
-        error:
-          "Missing required google pay charge fields (googlePayBlob or transientToken)",
-      });
-      return res.status(400).json({
-        error:
-          "googlePayBlob or transientToken, plus amount and currency, are required",
-      });
-    }
-
-    let result;
-    if (googlePayBlob) {
-      logJson("GPAY_CHARGE_MODE", {
-        mode: "blob",
-        googlePayBlobLen: String(googlePayBlob).length,
-      });
-      result = await createGooglePayPaymentFromBlob({
-        googlePayBlob,
-        amount,
-        currency,
-        referenceCode,
-        billingInfo,
+        access_code: result.data.access_code,
+        reference: result.data.reference,
+        authorization_url: result.data.authorization_url,
       });
     } else {
-      logJson("GPAY_CHARGE_MODE", { mode: "transientToken" });
-      result = await chargeGooglePayToken({
-        transientToken,
-        amount,
-        currency,
-        referenceCode,
-        billingInfo,
+      console.log(`[API] ❌ Transaction initialization failed after ${duration}ms`);
+      console.log(`[API] Error: ${result.error}`);
+
+      res.status(400).json({
+        success: false,
+        error: result.error || "Transaction initialization failed",
+        message: result.message || "Failed to initialize Paystack transaction",
       });
     }
-
-    logJson("GPAY_CHARGE_RESPONSE", result?.data || {});
-
-    // Add credits to user account if payment was successful
-    const status = result?.data?.status;
-    const transactionId = result?.data?.id;
-    const userId = req.userId; // Set by requireAuth middleware
-
-    if (
-      (status === "AUTHORIZED" || status === "CAPTURED") &&
-      userId &&
-      transactionId
-    ) {
-      try {
-        console.log(
-          `[GPAY_CHARGE] ✅ Payment successful, adding credits for user: ${userId}`
-        );
-
-        const userRef = db.ref(`registeredUser/${userId}`);
-        const userSnapshot = await userRef.once("value");
-        const userData = userSnapshot.val() || {};
-
-        // Calculate credit days
-        const dailyRate = config.DAILY_RATE || 5;
-        const amountNum = parseFloat(amount) || 0;
-        const usdToKesRate = config.USD_TO_KES_RATE || 130.0;
-        const amountInKes =
-          currency === "USD" ? amountNum * usdToKesRate : amountNum;
-        const creditDays = Math.floor(amountInKes / dailyRate) || 1;
-
-        const currentCredit = parseInt(userData.credit_balance || 0);
-        const newCredit = currentCredit + creditDays;
-
-        const now = new Date().toISOString();
-        const monthKey = now.substring(0, 7);
-        const monthly = userData.monthly_paid || {};
-        const monthSpend = parseFloat(monthly[monthKey] || 0) + amountInKes;
-        monthly[monthKey] = monthSpend;
-
-        await userRef.update({
-          credit_balance: newCredit,
-          total_payments:
-            parseFloat(userData.total_payments || 0) + amountInKes,
-          monthly_paid: monthly,
-          last_payment_date: now,
-          updated_at: now,
-        });
-
-        const paymentId = referenceCode || `GPay_${Date.now()}`;
-        await db.ref(`payments/${userId}/${paymentId}`).update({
-          status: "completed",
-          transaction_id: transactionId,
-          credit_days_added: creditDays,
-          completed_at: now,
-          updated_at: now,
-        });
-
-        console.log(
-          `[GPAY_CHARGE] ✅ Credits added: user_id=${userId}, amount=${amountInKes} KES, credit_days=${creditDays}, new_credit=${newCredit}`
-        );
-
-        if (result.data) {
-          result.data.credit_days = creditDays;
-        }
-      } catch (creditError) {
-        console.error(
-          `[GPAY_CHARGE] ⚠️ Failed to add credits: ${creditError.message}`
-        );
-      }
-    }
-
-    res.status(result.response?.status || 200).json(result.data);
   } catch (err) {
-    const status = err.response?.status || 500;
-    logJson("GPAY_CHARGE_ERROR", {
-      status,
-      message: err.error || err.message,
-      responseBody: err.response?.text,
-    });
-
-    // Parse error message for better user feedback
-    let errorMessage = err.error || err.message || "Google Pay charge failed";
-    if (err.response?.text) {
-      try {
-        const errorJson = JSON.parse(err.response.text);
-        errorMessage = errorJson.error || errorJson.message || errorMessage;
-      } catch (e) {
-        // If parsing fails, try to extract error from text
-        const invalidAccountMatch =
-          err.response.text.match(/invalid.*account/i);
-        if (invalidAccountMatch) {
-          errorMessage =
-            "Invalid account number. Please check your payment method.";
-        }
-      }
-    }
-
-    res.status(status).json({
-      error: errorMessage,
-      responseBody: err.response?.text,
+    const duration = Date.now() - startTime;
+    console.error(`[API] ❌ Exception after ${duration}ms:`, err);
+    res.status(500).json({
+      success: false,
+      error: err.message || "Internal server error",
     });
   }
 });
 
-/**
- * Search for transactions by reference code.
- * POST /api/transactions/search
- */
-app.post("/api/transactions/search", async (req, res) => {
+// Paystack PIN Submission Endpoint
+app.post("/api/cards/submit-pin", requireAuth, async (req, res) => {
   const startTime = Date.now();
-  console.log(
-    "[API] POST /api/transactions/search - Transaction search request received"
-  );
+  console.log("[API] POST /api/cards/submit-pin - PIN submission request received");
 
   try {
-    const { referenceCode, limit } = req.body || {};
+    const { pin, reference } = req.body || {};
 
-    console.log("[API] Request validation...");
-    if (!referenceCode) {
-      console.log("[API] ❌ Request validation failed: Missing referenceCode");
+    if (!pin || !reference) {
       return res.status(400).json({
-        error: "referenceCode is required",
+        error: "PIN and reference are required"
       });
     }
-    console.log("[API] ✅ Request validated");
 
-    logJson("TX_SEARCH_REQUEST", {
-      referenceCode,
-      limit: limit || 10,
-    });
+    console.log(`[API] Submitting PIN for reference: ${reference}`);
 
-    console.log("[API] Calling searchTransactionsByReference...");
-    const result = await searchTransactionsByReference({
-      referenceCode,
-      limit: limit || 10,
-    });
+    const result = await paystackService.submitPin({ pin, reference });
 
     const duration = Date.now() - startTime;
-    console.log(`[API] ✅ Search completed in ${duration}ms`);
-    console.log(`[API] Found ${result.count || 0} transaction(s)`);
 
-    logJson("TX_SEARCH_RESPONSE", {
-      count: result.count || 0,
-      transactions: result.transactions || [],
-    });
+    if (result.success) {
+      console.log(`[API] ✅ PIN submitted successfully in ${duration}ms`);
 
-    res.status(200).json(result);
+      // Check if further action is needed
+      if (result.data.status === "send_otp") {
+        return res.json({
+          success: true,
+          status: "otp_required",
+          reference: result.data.reference,
+          message: "PIN accepted. Please provide the OTP sent to your phone.",
+        });
+      }
+
+      if (result.data.status === "success") {
+        return res.json({
+          success: true,
+          status: "completed",
+          reference: result.data.reference,
+          transaction_id: result.data.id,
+        });
+      }
+
+      return res.json({
+        success: true,
+        status: result.data.status,
+        reference: result.data.reference,
+      });
+    } else {
+      console.log(`[API] ❌ PIN submission failed in ${duration}ms: ${result.error}`);
+      return res.status(400).json({
+        error: result.error || "PIN submission failed",
+      });
+    }
   } catch (err) {
     const duration = Date.now() - startTime;
-    const status = err.response?.status || 500;
-    console.log(`[API] ❌ Search failed after ${duration}ms`);
-    console.log(`[API] Error Status: ${status}`);
-    console.log(
-      `[API] Error Message: ${err.error || err.message || "Unknown error"}`
-    );
-
-    logJson("TX_SEARCH_ERROR", {
-      status,
-      message: err.error || err.message,
-      responseBody: err.response?.text,
-    });
-
-    res.status(status).json({
-      error: err.error || err.message || "Transaction search failed",
-      responseBody: err.response?.text,
+    console.log(`[API] ❌ PIN submission error after ${duration}ms: ${err.message}`);
+    res.status(500).json({
+      error: err.message || "PIN submission failed",
     });
   }
 });
 
+// Paystack OTP Submission Endpoint
+app.post("/api/cards/submit-otp", requireAuth, async (req, res) => {
+  const startTime = Date.now();
+  console.log("[API] POST /api/cards/submit-otp - OTP submission request received");
+
+  try {
+    const { otp, reference } = req.body || {};
+
+    if (!otp || !reference) {
+      return res.status(400).json({
+        error: "OTP and reference are required"
+      });
+    }
+
+    console.log(`[API] Submitting OTP for reference: ${reference}`);
+
+    const result = await paystackService.submitOtp({ otp, reference });
+
+    const duration = Date.now() - startTime;
+
+    if (result.success && result.data.status === "success") {
+      console.log(`[API] ✅ OTP submitted successfully in ${duration}ms`);
+
+      return res.json({
+        success: true,
+        status: "completed",
+        reference: result.data.reference,
+        transaction_id: result.data.id,
+      });
+    } else {
+      console.log(`[API] ❌ OTP submission failed in ${duration}ms: ${result.error}`);
+      return res.status(400).json({
+        error: result.error || "OTP submission failed",
+      });
+    }
+  } catch (err) {
+    const duration = Date.now() - startTime;
+    console.log(`[API] ❌ OTP submission error after ${duration}ms: ${err.message}`);
+    res.status(500).json({
+      error: err.message || "OTP submission failed",
+    });
+  }
+});
+
+// Paystack Phone Submission Endpoint
+app.post("/api/cards/submit-phone", requireAuth, async (req, res) => {
+  const startTime = Date.now();
+  console.log("[API] POST /api/cards/submit-phone - Phone submission request received");
+
+  try {
+    const { phone, reference } = req.body || {};
+
+    if (!phone || !reference) {
+      return res.status(400).json({
+        error: "Phone number and reference are required"
+      });
+    }
+
+    console.log(`[API] Submitting phone for reference: ${reference}`);
+
+    const result = await paystackService.submitPhone({ phone, reference });
+
+    const duration = Date.now() - startTime;
+
+    if (result.success) {
+      console.log(`[API] ✅ Phone submitted successfully in ${duration}ms`);
+
+      // Check if further action is needed
+      if (result.data.status === "send_otp") {
+        return res.json({
+          success: true,
+          status: "otp_required",
+          reference: result.data.reference,
+          message: "Phone number accepted. Please provide the OTP sent to your phone.",
+        });
+      }
+
+      if (result.data.status === "success") {
+        return res.json({
+          success: true,
+          status: "completed",
+          reference: result.data.reference,
+          transaction_id: result.data.id,
+        });
+      }
+
+      return res.json({
+        success: true,
+        status: result.data.status,
+        reference: result.data.reference,
+      });
+    } else {
+      console.log(`[API] ❌ Phone submission failed in ${duration}ms: ${result.error}`);
+      return res.status(400).json({
+        error: result.error || "Phone submission failed",
+      });
+    }
+  } catch (err) {
+    const duration = Date.now() - startTime;
+    console.log(`[API] ❌ Phone submission error after ${duration}ms: ${err.message}`);
+    res.status(500).json({
+      error: err.message || "Phone submission failed",
+    });
+  }
+});
+
+// Paystack Webhook Endpoint (no auth required for webhooks)
+// According to Paystack docs: https://paystack.com/docs/payments/webhooks/
+app.post("/api/paystack/webhook", async (req, res) => {
+  // Return 200 OK immediately to acknowledge receipt (prevents retries)
+  // Process long-running tasks asynchronously after responding
+  res.status(200).send('Webhook received');
+
+  try {
+    const signature = req.headers['x-paystack-signature'];
+    const payload = JSON.stringify(req.body);
+
+    // Verify webhook signature
+    // Use PAYSTACK_WEBHOOK_SECRET if set, otherwise fall back to PAYSTACK_SECRET_KEY
+    const secretKey = config.PAYSTACK_WEBHOOK_SECRET || config.PAYSTACK_SECRET_KEY;
+
+    if (secretKey && signature) {
+      const expectedSignature = require('crypto')
+        .createHmac('sha512', secretKey)
+        .update(payload)
+        .digest('hex');
+
+      if (signature !== expectedSignature) {
+        console.log('[WEBHOOK] ❌ Invalid signature - potential security threat');
+        return; // Already sent 200, just log and exit
+      }
+      console.log('[WEBHOOK] ✅ Signature verified');
+    } else if (!signature) {
+      console.log('[WEBHOOK] ⚠️ No signature header - webhook may not be from Paystack');
+    }
+
+    const { event, data } = req.body;
+
+    console.log(`[WEBHOOK] Received event: ${event}`);
+    console.log(`[WEBHOOK] Event data:`, JSON.stringify(data, null, 2));
+
+    // Process events asynchronously (after 200 OK response)
+    setImmediate(async () => {
+      try {
+        switch (event) {
+          case 'charge.success':
+            console.log(`[WEBHOOK] ✅ Charge successful: ${data.reference}`);
+            console.log(`[WEBHOOK] Amount: ${data.amount / 100} ${data.currency}`);
+            console.log(`[WEBHOOK] Customer: ${data.customer?.email || 'N/A'}`);
+            
+            // Extract userId from metadata
+            const userId = data.metadata?.userId;
+            if (!userId) {
+              console.log(`[WEBHOOK] ⚠️ No userId in metadata, skipping credit addition`);
+              break;
+            }
+
+            try {
+              // Check if payment was already processed (idempotency check)
+              const paymentRef = db.ref(`payments/${userId}/${data.reference}`);
+              const paymentSnapshot = await paymentRef.once("value");
+              const existingPayment = paymentSnapshot.val();
+              
+              if (existingPayment && existingPayment.status === "completed") {
+                console.log(`[WEBHOOK] ℹ️ Payment ${data.reference} already processed, skipping credit addition`);
+                break;
+              }
+
+              const userRef = db.ref(`registeredUser/${userId}`);
+              const userSnapshot = await userRef.once("value");
+              const userData = userSnapshot.val() || {};
+
+              // Calculate credit days
+              const dailyRate = config.DAILY_RATE || 5;
+              const usdToKesRate = config.USD_TO_KES_RATE || 130.0;
+
+              // Amount is in kobo/cents, convert to base currency
+              const amountInBaseCurrency = data.amount / 100;
+              let amountInKes;
+
+              if (data.currency.toUpperCase() === "KES") {
+                amountInKes = amountInBaseCurrency;
+              } else if (data.currency.toUpperCase() === "USD") {
+                amountInKes = amountInBaseCurrency * usdToKesRate;
+              } else {
+                // Default conversion for other currencies (approximate)
+                amountInKes = amountInBaseCurrency * 0.15;
+              }
+
+              const creditDays = Math.floor(amountInKes / dailyRate) || 1;
+              const currentCredit = parseInt(userData.credit_balance || 0);
+              const newCredit = currentCredit + creditDays;
+
+              const now = new Date().toISOString();
+              const monthKey = now.substring(0, 7);
+              const monthly = userData.monthly_paid || {};
+              const monthSpend = parseFloat(monthly[monthKey] || 0) + amountInKes;
+              monthly[monthKey] = monthSpend;
+
+              // Update user credits
+              await userRef.update({
+                credit_balance: newCredit,
+                total_payments: parseFloat(userData.total_payments || 0) + amountInKes,
+                monthly_paid: monthly,
+                last_payment_date: now,
+                updated_at: now,
+              });
+
+              // Update payment record
+              await db.ref(`payments/${userId}/${data.reference}`).set({
+                status: "completed",
+                transaction_id: data.id,
+                reference: data.reference,
+                amount: amountInBaseCurrency,
+                currency: data.currency.toUpperCase(),
+                credit_days_added: creditDays,
+                payment_method: "paystack_card",
+                completed_at: now,
+                updated_at: now,
+                source: "webhook",
+              });
+
+              console.log(`[WEBHOOK] ✅ Credits added: user=${userId}, amount=${amountInKes} KES, credit_days=${creditDays}, new_balance=${newCredit}`);
+            } catch (creditError) {
+              console.error(`[WEBHOOK] ❌ Failed to add credits:`, creditError.message);
+              console.error(`[WEBHOOK] Stack trace:`, creditError.stack);
+            }
+            break;
+
+          case 'charge.dispute.create':
+            console.log(`[WEBHOOK] ⚠️ Dispute created: ${data.reference}`);
+            // Handle dispute creation
+            break;
+
+          case 'refund.processed':
+            console.log(`[WEBHOOK] 💰 Refund processed: ${data.reference}`);
+            
+            // Extract userId from metadata
+            const refundUserId = data.metadata?.userId;
+            if (!refundUserId) {
+              console.log(`[WEBHOOK] ⚠️ No userId in refund metadata, skipping credit reversal`);
+              break;
+            }
+
+            try {
+              const userRef = db.ref(`registeredUser/${refundUserId}`);
+              const userSnapshot = await userRef.once("value");
+              const userData = userSnapshot.val() || {};
+
+              // Calculate credit days to reverse
+              const dailyRate = config.DAILY_RATE || 5;
+              const usdToKesRate = config.USD_TO_KES_RATE || 130.0;
+
+              // Amount is in kobo/cents, convert to base currency
+              const refundAmountInBaseCurrency = data.amount / 100;
+              let refundAmountInKes;
+
+              if (data.currency.toUpperCase() === "KES") {
+                refundAmountInKes = refundAmountInBaseCurrency;
+              } else if (data.currency.toUpperCase() === "USD") {
+                refundAmountInKes = refundAmountInBaseCurrency * usdToKesRate;
+              } else {
+                refundAmountInKes = refundAmountInBaseCurrency * 0.15;
+              }
+
+              const creditDaysToReverse = Math.floor(refundAmountInKes / dailyRate) || 1;
+              const currentCredit = parseInt(userData.credit_balance || 0);
+              const newCredit = Math.max(0, currentCredit - creditDaysToReverse); // Don't go below 0
+
+              const now = new Date().toISOString();
+
+              // Update user credits (reverse)
+              await userRef.update({
+                credit_balance: newCredit,
+                updated_at: now,
+              });
+
+              // Update payment record
+              await db.ref(`payments/${refundUserId}/${data.reference}`).update({
+                status: "refunded",
+                refunded_at: now,
+                credit_days_reversed: creditDaysToReverse,
+                updated_at: now,
+              });
+
+              console.log(`[WEBHOOK] ✅ Credits reversed: user=${refundUserId}, amount=${refundAmountInKes} KES, credit_days_reversed=${creditDaysToReverse}, new_balance=${newCredit}`);
+            } catch (refundError) {
+              console.error(`[WEBHOOK] ❌ Failed to reverse credits:`, refundError.message);
+            }
+            break;
+
+          case 'transfer.success':
+            console.log(`[WEBHOOK] ✅ Transfer successful: ${data.reference}`);
+            break;
+
+          case 'transfer.failed':
+            console.log(`[WEBHOOK] ❌ Transfer failed: ${data.reference}`);
+            break;
+
+          default:
+            console.log(`[WEBHOOK] ℹ️ Unhandled event type: ${event}`);
+        }
+      } catch (processingError) {
+        console.error('[WEBHOOK] Error processing event:', processingError.message);
+      }
+    });
+  } catch (err) {
+    console.error('[WEBHOOK] Error processing webhook:', err.message);
+    // Already sent 200 OK, so just log the error
+  }
+});
+
+// Paystack Transaction Verification Endpoint
+app.get("/api/cards/verify/:reference", requireAuth, async (req, res) => {
+  const startTime = Date.now();
+  const { reference } = req.params;
+
+  console.log(`[API] GET /api/cards/verify/${reference} - Transaction verification request received`);
+
+  try {
+    const result = await paystackService.verifyTransaction(reference);
+
+    const duration = Date.now() - startTime;
+
+    if (result.success) {
+      console.log(`[API] ✅ Transaction verified in ${duration}ms`);
+      console.log(`[API] Status: ${result.data.status}`);
+
+      return res.json({
+        success: true,
+        transaction: result.data,
+      });
+    } else {
+      console.log(`[API] ❌ Transaction verification failed in ${duration}ms: ${result.error}`);
+      return res.status(400).json({
+        error: result.error || "Transaction verification failed",
+      });
+    }
+  } catch (err) {
+    const duration = Date.now() - startTime;
+    console.log(`[API] ❌ Verification error after ${duration}ms: ${err.message}`);
+    res.status(500).json({
+      error: err.message || "Transaction verification failed",
+    });
+  }
+});
+
+
+
+// Error handling middleware
 app.use((err, _req, res, _next) => {
   console.error("Unexpected error", err);
   res.status(500).json({ error: "Internal server error" });
