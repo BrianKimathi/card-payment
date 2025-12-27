@@ -32,22 +32,40 @@ router.get("/user/credit", requireAuth, async (req, res) => {
           throw new Error("Firebase auth not initialized");
         }
         const userInfo = await auth.getUser(userId);
+        // Give new users 35 credits (one week) as welcome bonus
+        const WELCOME_CREDITS = 35;
         userData = {
           user_id: userId,
           email: userInfo.email,
           registration_date: currentTime.toISOString(),
-          credit_balance: 0,
+          credit_balance: WELCOME_CREDITS,
           total_payments: 0,
+          welcome_credits_given: true, // Track that welcome credits were given
           created_at: currentTime.toISOString(),
           updated_at: currentTime.toISOString(),
         };
         await userRef.set(userData);
         console.log(
-          `[get_credit_info] New user ${userId} registered with fresh trial`
+          `[get_credit_info] New user ${userId} registered with ${WELCOME_CREDITS} welcome credits`
         );
       } catch (error) {
         return res.status(500).json({ error: `Failed to create user: ${error.message}` });
       }
+    } else if (!userData.welcome_credits_given) {
+      // Existing user who hasn't received welcome credits yet - give them now
+      const WELCOME_CREDITS = 35;
+      const currentBalance = userData.credit_balance || 0;
+      await userRef.update({
+        credit_balance: currentBalance + WELCOME_CREDITS,
+        welcome_credits_given: true,
+        updated_at: currentTime.toISOString(),
+      });
+      console.log(
+        `[get_credit_info] Existing user ${userId} received ${WELCOME_CREDITS} welcome credits (new balance: ${currentBalance + WELCOME_CREDITS})`
+      );
+      // Update userData for response
+      userData.credit_balance = currentBalance + WELCOME_CREDITS;
+      userData.welcome_credits_given = true;
     }
 
     // Check if user needs reset
